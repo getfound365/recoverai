@@ -426,7 +426,7 @@ wait_true 'document.querySelector("[data-testid=simulation-result]") !== null' "
 probe "10-payment"
 SIM="$(jget simulation_result)"
 PURGED="$(rx "$SIM" 'Queue purged: ([0-9]+) scheduled contact')"
-FEE="$(rx "$SIM" '20% fee \$([0-9.,]+)')"
+FEE="$(rx "$SIM" '20% fee (\$[0-9.,]+)')"
 ENTRY="$(rx "$SIM" 'Ledger line appended: entry ([0-9]+)')"
 counter payment_debtor "$PAY_DEBTOR"
 counter payment_queue_purged_runs "${PURGED:-0}"
@@ -479,7 +479,7 @@ def number(key):
 
 
 def money(key):
-    match = re.search(r"([0-9][0-9,]*\.\d\d)", counters.get(key, ""))
+    match = re.search(r"\(?\$?([0-9][0-9,]*\.\d+)", counters.get(key, ""))
     return float(match.group(1).replace(",", "")) if match else None
 
 
