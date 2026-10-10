@@ -1497,7 +1497,8 @@ class TestVocabulary(GateTestCase):
         #   Phase 2  billing_route_verifications, lifecycle_transition_log,
         #            manual_review_decisions, commercial_msa_records
         #   Phase 3  ingestion_batches
-        self.assertEqual(len(TABLES), 13)
+        #   Phase 4  onboarding_attestations, collections_tracking_choices
+        self.assertEqual(len(TABLES), 15)
         self.assertEqual(len(set(TABLES)), len(TABLES), "TABLES has a duplicate entry")
 
     def test_the_snapshot_exporter_covers_every_table(self):

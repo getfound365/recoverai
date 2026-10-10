@@ -353,6 +353,11 @@ REFUSAL_BATCH_ALREADY_COMMITTED = "BATCH_ALREADY_COMMITTED"
 REFUSAL_MAPPING_ERROR = "BLOCKED_MAPPING_ERROR"
 REFUSAL_WARRANTY_NOT_ACKNOWLEDGED = "BLOCKED_WARRANTY_NOT_ACKNOWLEDGED"
 REFUSAL_NO_WARRANTY_SIGNATURE = "BLOCKED_NO_WARRANTY_SIGNATURE"
+#: Phase 4: the REAL Step 3 gate. The warranty a batch binds to is no longer just a
+#: sha256 of a rulebook string - it is the client's own recorded, versioned attestation
+#: row (onboarding_attestations, type 'step3_data_warranty'). A batch raised before its
+#: client attested refuses with this token.
+REFUSAL_NO_STEP3_ATTESTATION = "BLOCKED_NO_STEP3_ATTESTATION"
 REFUSAL_UNSUPPORTED_FILE = "UNSUPPORTED_FILE_TYPE"
 
 #: The source_system / source_ref stamped on rows a spreadsheet import writes, so a
@@ -879,7 +884,15 @@ def preview_spreadsheet(*, file_name: str, content: Any, client_id: str,
 # --- the immutable batch record ---------------------------------------------
 #: The fields batch_sha256 covers. Every one is coerced by `_batch_content()`, so the
 #: hash recomputes identically from the insert and from a row read back out of the table.
-BATCH_HASH_FIELDS = (
+#:
+#: TWO field sets, on purpose. `BATCH_HASH_FIELDS_LEGACY` is exactly the set a batch row
+#: was hashed over before the real Step 3 gate existed (Phase 3). `BATCH_HASH_FIELDS`
+#: adds the Step 3 attestation id. A row whose attestation id is empty is a LEGACY row:
+#: it is verified against the legacy set, because this table is append-only history and
+#: re-hashing an already-committed batch would be rewriting it. Every NEW row carries a
+#: non-empty attestation id and is hashed over the full set, so the gate's own evidence
+#: is inside the hash that a later commit re-checks.
+BATCH_HASH_FIELDS_LEGACY = (
     "client_id", "uploader_id", "file_name", "file_sha256", "source_format",
     "rows_seen", "rows_accepted", "rows_rejected", "preview_fingerprint",
     "mapping_json", "rejected_json", "consumer_debt_marker", "consumer_debt_signals",
@@ -887,13 +900,21 @@ BATCH_HASH_FIELDS = (
     "warranty_text_sha256", "warranty_binding_sha256", "recorded_at_ms", "recorded_by",
     "reason", "note",
 )
+BATCH_HASH_FIELDS = BATCH_HASH_FIELDS_LEGACY + ("warranty_step3_attestation_id",)
 
 
-def _batch_content(row: Dict[str, Any]) -> Dict[str, Any]:
+def batch_hash_fields_for(row: Dict[str, Any]) -> tuple:
+    """Which field set this row was hashed over: legacy (no Step 3 binding) or current."""
+    if str(row.get("warranty_step3_attestation_id") or ""):
+        return BATCH_HASH_FIELDS
+    return BATCH_HASH_FIELDS_LEGACY
+
+
+def _batch_content(row: Dict[str, Any], fields=None) -> Dict[str, Any]:
     """One canonical shape for the hashed fields, whatever the source (a fresh dict or a
     row read back from SQLite, where booleans are integers and NULL is None)."""
     content: Dict[str, Any] = {}
-    for field_name in BATCH_HASH_FIELDS:
+    for field_name in (fields or batch_hash_fields_for(row)):
         value = row.get(field_name)
         if field_name in ("rows_seen", "rows_accepted", "rows_rejected",
                           "consumer_debt_marker", "warranty_acknowledged"):
@@ -903,23 +924,34 @@ def _batch_content(row: Dict[str, Any]) -> Dict[str, Any]:
     return content
 
 
-def batch_sha256(row: Dict[str, Any]) -> str:
-    return sha256_canonical(_batch_content(row))
+def batch_sha256(row: Dict[str, Any], fields=None) -> str:
+    return sha256_canonical(_batch_content(row, fields))
 
 
 def warranty_binding(*, client_id: str, signature_reference: str, document_version: str,
-                     text_sha256: str, uploader_id: str, acknowledged_at_ms: str) -> str:
-    """The cryptographic binding between a batch and the client's Step 3 warranty: the
-    client's own signed reference, plus the sha256 of the exact wording it was signed
-    under, plus who acknowledged it and when. All five are inside one hash."""
-    return sha256_canonical({
+                     text_sha256: str, uploader_id: str, acknowledged_at_ms: str,
+                     step3_attestation_id: str = "",
+                     step3_attestation_sha256: str = "") -> str:
+    """The cryptographic binding between a batch and the client's Step 3 warranty.
+
+    Six things were always inside this hash: the client, the legal sign-off reference, the
+    version of the wording, the sha256 of that exact wording, who acknowledged it and when.
+    Phase 4 adds the two facts that make it the REAL gate: the id of the client's recorded
+    Step 3 attestation row and the sha256 of the attestation record itself. A batch can no
+    longer cite a rulebook string - it cites the row a human ticked.
+    """
+    payload = {
         "client_id": client_id,
         "warranty_signature_reference": signature_reference,
         "warranty_document_version": document_version,
         "warranty_text_sha256": text_sha256,
         "uploader_id": uploader_id,
         "acknowledged_at_ms": acknowledged_at_ms,
-    })
+    }
+    if step3_attestation_id:
+        payload["warranty_step3_attestation_id"] = step3_attestation_id
+        payload["warranty_step3_attestation_sha256"] = step3_attestation_sha256
+    return sha256_canonical(payload)
 
 
 def _chain_hash(prev_chain_hash: str, batch_sha: str, batch_id: str) -> str:
@@ -934,8 +966,12 @@ def register_ingestion_batch(store, preview: Dict[str, Any], *, uploader_id: str
 
     Refuses, with one token, when: the preview itself is not importable
     (`BLOCKED_MAPPING_ERROR`), the Step 3 warranty checkbox was not explicitly ticked
-    (`BLOCKED_WARRANTY_NOT_ACKNOWLEDGED`), or the client has no valid signed
-    authorization to bind the warranty to (`BLOCKED_NO_WARRANTY_SIGNATURE`).
+    (`BLOCKED_WARRANTY_NOT_ACKNOWLEDGED`), the client has no valid signed authorization
+    to bind the warranty to (`BLOCKED_NO_WARRANTY_SIGNATURE`), or - Phase 4, the real
+    gate - the client has no recorded Step 3 attestation for the warranty to bind to
+    (`BLOCKED_NO_STEP3_ATTESTATION`). A batch registered before its client attested is
+    refused; batches committed before this gate existed stay valid, because
+    ingestion_batches is append-only history.
     """
     if not preview.get("preview_ok"):
         return _refusal(preview.get("refusal_token") or REFUSAL_MAPPING_ERROR,
@@ -958,18 +994,33 @@ def register_ingestion_batch(store, preview: Dict[str, Any], *, uploader_id: str
         return _refusal(REFUSAL_NO_WARRANTY_SIGNATURE, client_id=client_id,
                         detail=f"there is no valid signed authorization to bind this batch's "
                                f"warranty to: {state['reason']}")
+    # Phase 4: the real Step 3 gate. The warranty a batch binds to is the client's own
+    # recorded, versioned attestation row - not a hash of a string in the rulebook. A
+    # client that has not attested has nothing for a batch to bind to, so this refuses.
+    attestation = onboarding.step3_gate(store, client_id)
+    if attestation is None:
+        return _refusal(REFUSAL_NO_STEP3_ATTESTATION, client_id=client_id,
+                        file_name=preview.get("file_name"),
+                        detail="there is no recorded Step 3 warranty attestation for this client: "
+                               "the backend refuses to register a batch against an unwarranted "
+                               "file. Record the Step 3 attestation first; the exact checkbox "
+                               "text and its sha256 are then stored against the sign-off.")
     uploader = str(uploader_id or "").strip()
     if not uploader:
         raise ValueError("uploader_id is required: an ingestion batch names who handed over the file")
 
     warranty = config.step3_warranty()
     acknowledged_at_ms = clock.iso_ms()
-    text_sha = sha256_text(str(warranty["text"]))
+    text_sha = str(attestation["text_sha256"])
+    attestation_id = str(attestation["attestation_id"])
+    attestation_sha = str(attestation["attestation_sha256"])
     binding = warranty_binding(client_id=client_id,
                                signature_reference=str(settings["signature_reference"]),
                                document_version=str(warranty["version"]),
                                text_sha256=text_sha, uploader_id=uploader,
-                               acknowledged_at_ms=acknowledged_at_ms)
+                               acknowledged_at_ms=acknowledged_at_ms,
+                               step3_attestation_id=attestation_id,
+                               step3_attestation_sha256=attestation_sha)
     mapping = preview.get("mapping") or {"rows": []}
     content: Dict[str, Any] = {
         "client_id": client_id,
@@ -993,6 +1044,9 @@ def register_ingestion_batch(store, preview: Dict[str, Any], *, uploader_id: str
         "warranty_document_version": str(warranty["version"]),
         "warranty_text_sha256": text_sha,
         "warranty_binding_sha256": binding,
+        # Phase 4: the real Step 3 gate's own evidence, inside the hash above
+        "warranty_step3_attestation_id": attestation_id,
+        "warranty_step3_attestation_sha256": attestation_sha,
         "recorded_at_ms": acknowledged_at_ms,
         "recorded_at": clock.iso(),
         "recorded_by": str(who or uploader),
@@ -1013,8 +1067,9 @@ def register_ingestion_batch(store, preview: Dict[str, Any], *, uploader_id: str
                   rejected_json, consumer_debt_marker, consumer_debt_signals, recorded_at_ms,
                   recorded_at, warranty_acknowledged, warranty_signature_reference,
                   warranty_document_version, warranty_text_sha256, warranty_binding_sha256,
+                  warranty_step3_attestation_id, warranty_step3_attestation_sha256,
                   batch_sha256, prev_chain_hash, chain_hash, recorded_by, reason, note)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (batch_id, content["client_id"], content["uploader_id"], content["file_name"],
              content["file_sha256"], content["source_format"], content["rows_seen"],
              content["rows_accepted"], content["rows_rejected"], content["preview_fingerprint"],
@@ -1022,7 +1077,9 @@ def register_ingestion_batch(store, preview: Dict[str, Any], *, uploader_id: str
              content["consumer_debt_signals"], content["recorded_at_ms"], content["recorded_at"],
              content["warranty_acknowledged"], content["warranty_signature_reference"],
              content["warranty_document_version"], content["warranty_text_sha256"],
-             content["warranty_binding_sha256"], batch_sha, prev_chain, chain,
+             content["warranty_binding_sha256"], content["warranty_step3_attestation_id"],
+             content["warranty_step3_attestation_sha256"],
+             batch_sha, prev_chain, chain,
              content["recorded_by"], content["reason"], content["note"]),
         )
     record = store.query_one("SELECT * FROM ingestion_batches WHERE batch_id = ?", (batch_id,))
@@ -1036,9 +1093,13 @@ def register_ingestion_batch(store, preview: Dict[str, Any], *, uploader_id: str
                      consumer_debt_marker=content["consumer_debt_marker"],
                      consumer_debt_signals=content["consumer_debt_signals"],
                      warranty_document_version=content["warranty_document_version"],
+                     warranty_step3_attestation_id=content["warranty_step3_attestation_id"],
+                     warranty_step3_attestation_sha256=content["warranty_step3_attestation_sha256"],
                      warranty_binding_sha256=binding, batch_sha256=batch_sha, chain_hash=chain)
     out = {"ok": True, "batch_id": batch_id, "batch_sha256": batch_sha, "prev_chain_hash": prev_chain,
-           "chain_hash": chain, "warranty_binding_sha256": binding, "record": record}
+           "chain_hash": chain, "warranty_binding_sha256": binding,
+           "warranty_step3_attestation_id": attestation_id,
+           "warranty_step3_attestation_sha256": attestation_sha, "record": record}
     return out
 
 
@@ -1051,7 +1112,14 @@ def verify_ingestion_batches(store) -> Dict[str, Any]:
     rows = store.query("SELECT * FROM ingestion_batches ORDER BY seq")
     breaks: List[Dict[str, Any]] = []
     previous = GENESIS_BATCH_CHAIN_HASH
+    legacy = 0
     for row in rows:
+        # A row appended before the real Step 3 gate existed carries an empty attestation
+        # id and is verified over the legacy field set; a row appended since carries the
+        # gate's evidence inside its hash. Both are reported, so nobody has to guess which
+        # shape a given row is.
+        if not str(row.get("warranty_step3_attestation_id") or ""):
+            legacy += 1
         recomputed = batch_sha256(row)
         if recomputed != row["batch_sha256"]:
             breaks.append({"seq": row["seq"], "batch_id": row["batch_id"],
@@ -1066,6 +1134,10 @@ def verify_ingestion_batches(store) -> Dict[str, Any]:
                            "problem": "chain_hash is not sha256(prev_chain_hash | batch_sha256 | batch_id)"})
         previous = row["chain_hash"]
     return {"ok": not breaks, "count": len(rows), "genesis_chain_hash": GENESIS_BATCH_CHAIN_HASH,
+            "legacy_rows": legacy, "step3_gated_rows": len(rows) - legacy,
+            "hash_field_sets": {
+                "legacy": list(BATCH_HASH_FIELDS_LEGACY),
+                "current": list(BATCH_HASH_FIELDS)},
             "breaks": breaks}
 
 

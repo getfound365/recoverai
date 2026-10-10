@@ -251,5 +251,58 @@
       "chain_note": "ingestion_batches is append-only and hash-chained like billing_route_verifications: chain_hash = sha256(prev_chain_hash | batch_sha256 | batch_id) in seq order, starting from GENESIS_BATCH_CHAIN_HASH in engine/ingest.py. It is TAMPER-EVIDENT, not signature-proof: it proves the record has not changed and where it sits, not who wrote it.",
       "fingerprint_note": "preview_fingerprint = sha256 over the canonical previewed state (file sha256, client_id, format, mapping, totals, dropped rows with their tokens, the accepted source rows, the consumer-debt state). COMMIT refuses with BATCH_PREVIEW_STATE_CHANGED if the preview handed to it does not recompute to the same fingerprint as the record."
     }
+  },
+  "onboarding": {
+    "step_order": [
+      {"step": 1, "key": "fee_tracking_choice", "title": "Choose how we track your collections", "note": "Where we look, never whether we look. The choice is bound into the signature hash: changing it later changes the arrangement the sign-off covers, so the engine revokes the standing sign-off and the client signs again."},
+      {"step": 2, "key": "fee_recovery_transparency", "title": "Fee and recovery tracking transparency", "note": "A mandatory acknowledgement, unselected by default. Nothing proceeds until it is ticked."},
+      {"step": 3, "key": "step3_warranty", "title": "Step 3: the data warranty", "note": "The real gate. Unselected by default, refused by the backend until the flag is explicitly TRUE, and the exact checkbox text is stored against the sign-off with its sha256 and version."},
+      {"step": 4, "key": "signoff", "title": "Sign the authorization", "note": "The typed name, title, authorized scope, tracking choice and the Step 3 attestation hash are what the signature reference covers."}
+    ],
+    "fee_tracking": {
+      "default": "hybrid",
+      "modes": [
+        {
+          "id": "integration",
+          "label": "Accounting integration",
+          "plain_english": "Read the balance drop from your accounting system",
+          "confirmation_channel": "accounting_webhook",
+          "latency": "near-instant when the integration is live, up to a day behind on a delta sync",
+          "reads": "the invoice balance in your ledger",
+          "available_today": false,
+          "honest_note": "No live QuickBooks or Xero connection exists today. This option records your choice; it cannot read anything until a real integration is built."
+        },
+        {
+          "id": "manual_attestation",
+          "label": "Manual attestation",
+          "plain_english": "You tell us when a debtor pays",
+          "confirmation_channel": "manual_attestation",
+          "latency": "whenever you act",
+          "reads": "your attestation, and nothing else",
+          "available_today": true,
+          "honest_note": "Billable only against an attestation that names who confirmed it. Nothing is billed from a guess."
+        },
+        {
+          "id": "hybrid",
+          "label": "Hybrid (default)",
+          "plain_english": "Read the balance drop where we can, and take your word where we cannot",
+          "confirmation_channel": "hybrid: accounting_webhook or delta_sync where live, manual_attestation otherwise",
+          "latency": "as fast as the channel that confirmed it",
+          "reads": "your ledger where an integration exists, your attestation everywhere else",
+          "available_today": true,
+          "honest_note": "Today the integration half is not live, so in practice every confirmation would come from your attestation."
+        }
+      ],
+      "rule": "The client chooses WHERE we look, never WHETHER we look. Every ledger line cites its confirmation source and nothing is billable without one.",
+      "change_rule": "A change to this choice is logged append-only (who, old -> new, millisecond timestamp, reason) and it rebinds the sign-off: the engine revokes the standing signature, drops the client to hitl and requires a fresh signature under the new choice. A signature that no longer describes the tracking arrangement is not a valid sign-off."
+    },
+    "step2_acknowledgement": {
+      "version": "ACK-1.0",
+      "default": false,
+      "text": "I understand how RecoverAI tracks collections and how the 20% fee is calculated: RecoverAI never touches my money and never has access to my bank accounts; a fee is charged only on funds actually collected and confirmed, at a flat 20% with no retainer, setup fee, per-call charge or tiering; and every fee line cites the confirmation source it came from.",
+      "tooltip": "We never touch your money. When your debtor pays you, we read the balance drop and log the 20%.",
+      "invoice_modification_warning": "If you edit an invoice amount after a payment has been claimed against it, the engine cannot tell a payment from a correction: the record parks in Pending_Adjustment_Confirmation, every scheduled contact for that debtor freezes, and nothing is billed until a human says which it was. A confirmed payment is billable; an adjustment closes the record with no fee.",
+      "acknowledgement_rule": "Mandatory before proceeding and unselected by default. It is recorded against the client in the same append-only onboarding_attestations table as the Step 3 warranty, with its own version, its exact text and the sha256 of that text; the wizard will not advance past this step until it is ticked, and the Step 3 gate stays shut until the Step 3 attestation is recorded."
+    }
   }
 }

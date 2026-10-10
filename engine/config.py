@@ -140,6 +140,48 @@ def step3_warranty() -> Dict[str, Any]:
     return load_rulebook()["spreadsheet_intake"]["step3_warranty"]
 
 
+def onboarding() -> Dict[str, Any]:
+    """The onboarding step ladder: the fee-tracking choice, the Step 2 transparency
+    acknowledgement and the Step 3 warranty. Data, like every other rule in here."""
+    return load_rulebook()["onboarding"]
+
+
+def fee_tracking_cfg() -> Dict[str, Any]:
+    return onboarding()["fee_tracking"]
+
+
+def fee_tracking_modes() -> list[Dict[str, Any]]:
+    return list(fee_tracking_cfg()["modes"])
+
+
+def fee_tracking_mode_ids() -> list[str]:
+    return [str(m["id"]) for m in fee_tracking_modes()]
+
+
+def default_fee_tracking_mode() -> str:
+    return str(fee_tracking_cfg()["default"])
+
+
+def fee_tracking_mode(mode_id: str) -> Dict[str, Any]:
+    for mode in fee_tracking_modes():
+        if str(mode["id"]) == str(mode_id):
+            return mode
+    raise KeyError(f"unknown fee-tracking mode {mode_id!r}; the rulebook knows "
+                   f"{fee_tracking_mode_ids()}")
+
+
+def step2_acknowledgement() -> Dict[str, Any]:
+    return onboarding()["step2_acknowledgement"]
+
+
+def onboarding_step_order() -> list[Dict[str, Any]]:
+    return list(onboarding()["step_order"])
+
+
+def rulebook_version() -> str:
+    return str(load_rulebook().get("rulebook_version", "unknown"))
+
+
 def consumer_debt_scan_cfg() -> Dict[str, Any]:
     return load_rulebook()["spreadsheet_intake"]["consumer_debt_scan"]
 

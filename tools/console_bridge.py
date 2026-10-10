@@ -488,6 +488,99 @@ def op_simulate_payment(engine, request: dict) -> dict:
     return result
 
 
+# --- onboarding, reports and the Integrations Hub (Phase 4) ------------------
+# Same rule as every op above: a thin dispatch onto the engine facade. The Step 2 and
+# Step 3 gates, the fee-tracking rebind, the report counts and the sample-file mapping
+# all live in engine/, so the console cannot show a gate as open that the engine refuses,
+# or a count the engine did not produce.
+def op_onboarding(engine, request: dict) -> dict:
+    _bootstrap(engine)
+    client_id = _client_id(request)
+    payload = engine.console_onboarding(client_id)
+    payload["mode"] = engine.console_mode(client_id)
+    return payload
+
+
+def op_tracking_mode(engine, request: dict) -> dict:
+    """Step 1, changed later. The engine writes the append-only trail row and rebinds the
+    sign-off; a change to a choice the sign-off covered REVOKES that sign-off."""
+    _bootstrap(engine)
+    client_id = _client_id(request)
+    new_mode = str(request.get("new_mode") or "").strip()
+    if not new_mode:
+        raise ValueError("tracking_mode needs a new_mode")
+    result = engine.set_tracking_mode(client_id, new_mode, _who(request),
+                                      str(request.get("reason") or "changed from the console"))
+    payload = {"result": result, "onboarding": engine.console_onboarding(client_id)}
+    payload["ok"] = bool(result.get("ok"))
+    if not result.get("ok"):
+        payload["refusal_token"] = result.get("refusal_token")
+    return payload
+
+
+def op_attest(engine, request: dict) -> dict:
+    """Record a Step 2 acknowledgement or the Step 3 warranty.
+
+    `acknowledged` is passed through EXACTLY as sent: the engine refuses anything that is
+    not explicitly true, so the console cannot tick this on the operator's behalf and the
+    unticked state is a real refusal, not a disabled button.
+    """
+    _bootstrap(engine)
+    client_id = _client_id(request)
+    step = str(request.get("step") or "").strip()
+    if step not in ("2", "3"):
+        raise ValueError("attest needs step '2' or '3'")
+    acknowledged = request.get("acknowledged")
+    note = str(request.get("note") or "") or None
+    if step == "2":
+        result = engine.record_step2_acknowledgement(client_id, acknowledged, _who(request),
+                                                     source="console", note=note)
+    else:
+        result = engine.record_step3_attestation(client_id, acknowledged, _who(request),
+                                                 source="console", note=note)
+    payload = dict(result)
+    payload["onboarding"] = engine.console_onboarding(client_id)
+    return payload
+
+
+def op_signoff(engine, request: dict) -> dict:
+    """Step 4: the signature. Everything the wizard collected is passed to the real
+    `capture_signoff`, which hashes the fee-tracking choice and the Step 3 attestation
+    text into the reference."""
+    _bootstrap(engine)
+    from engine import config  # noqa: PLC0415
+    client_id = _client_id(request)
+    signer_name = str(request.get("signer_name") or "").strip()
+    signer_title = str(request.get("signer_title") or "").strip()
+    if not signer_name or not signer_title:
+        result = {"ok": False, "refusal_token": "BLOCKED_SIGNOFF_INCOMPLETE",
+                  "detail": "a sign-off needs a typed signer name and corporate title"}
+        result["onboarding"] = engine.console_onboarding(client_id)
+        return result
+    scope_pairs = request.get("scope_pairs")
+    if not scope_pairs:
+        scope_pairs = [[o["channel"], str(o["aging_state"])] for o in config.scope_options()]
+    result = engine.capture_signoff(client_id, signer_name, signer_title,
+                                    who=_who(request), scope_pairs=scope_pairs,
+                                    tracking_mode=request.get("tracking_mode") or None)
+    result["ok"] = True
+    result["onboarding"] = engine.console_onboarding(client_id)
+    return result
+
+
+def op_reports(engine, request: dict) -> dict:
+    """Weekly and monthly counts from the engine's own logs. Real counts only."""
+    _bootstrap(engine)
+    return engine.console_reports(_client_id(request))
+
+
+def op_integrations(engine, request: dict) -> dict:
+    """The SIMULATED Integrations Hub: a sample export through the real mapper."""
+    _bootstrap(engine)
+    return engine.integrations_hub(client_id=_client_id(request),
+                                   sample=request.get("sample") or None)
+
+
 OPS = {
     "status": op_status,
     "bootstrap": op_bootstrap,
@@ -513,6 +606,13 @@ OPS = {
     "alerts": op_alerts,
     "money": op_money,
     "simulate_payment": op_simulate_payment,
+    # --- onboarding, reports and the Integrations Hub (Phase 4) ------------
+    "onboarding": op_onboarding,
+    "tracking_mode": op_tracking_mode,
+    "attest": op_attest,
+    "signoff": op_signoff,
+    "reports": op_reports,
+    "integrations": op_integrations,
 }
 
 

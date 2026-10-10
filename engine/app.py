@@ -22,7 +22,8 @@ TABLES = ("debtor_records", "client_autonomy_settings", "autonomy_mode_history",
           "outbound_contact_logs", "payment_events", "collections_ledger",
           "balance_edit_events", "reopen_audit_events", "billing_route_verifications",
           "lifecycle_transition_log", "manual_review_decisions",
-          "commercial_msa_records", "ingestion_batches")
+          "commercial_msa_records", "ingestion_batches",
+          "onboarding_attestations", "collections_tracking_choices")
 
 
 class RecoverAI:
@@ -474,3 +475,60 @@ class RecoverAI:
     def console_simulate_payment(self) -> Dict[str, Any]:
         """Run the engine's real payment path against a simulated webhook signal."""
         return daily_ops.simulate_payment(self)
+
+    # --- Phase 4: the onboarding ladder (steps 1-3) ------------------------
+    def console_onboarding(self, client_id: str) -> Dict[str, Any]:
+        """Every onboarding surface in one read: the fee-tracking choice and its trail, the
+        Step 2 acknowledgement, the Step 3 gate and its attestation, the sign-off and what
+        its hash covers, the batches this client's office has handed over, and the parked
+        adjustment list. Reads only; the console decides nothing."""
+        return daily_ops.onboarding_screen(self.store, client_id)
+
+    def set_tracking_mode(self, client_id: str, new_mode: str, who: str,
+                          reason: str = "") -> Dict[str, Any]:
+        """Step 1, changed later: append-only trail plus a real rebind of the sign-off."""
+        return onboarding.set_tracking_mode(self.store, client_id, new_mode, who, reason,
+                                            self.audit, self.queue)
+
+    def record_step2_acknowledgement(self, client_id: str, acknowledged: Any, who: str,
+                                     source: str = "console",
+                                     note: Optional[str] = None) -> Dict[str, Any]:
+        return onboarding.record_step2_acknowledgement(self.store, client_id, acknowledged,
+                                                       who, source, note, self.audit)
+
+    def record_step3_attestation(self, client_id: str, acknowledged: Any, who: str,
+                                 source: str = "console",
+                                 note: Optional[str] = None) -> Dict[str, Any]:
+        """The real Step 3 gate. Refuses unless the flag is explicitly TRUE."""
+        return onboarding.record_step3_attestation(self.store, client_id, acknowledged,
+                                                   who, source, note, self.audit)
+
+    def step3_gate_state(self, client_id: str) -> Dict[str, Any]:
+        return onboarding.step3_gate_state(self.store, client_id)
+
+    def onboarding_attestations(self, client_id: str,
+                                attestation_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        return onboarding.attestations(self.store, client_id, attestation_type)
+
+    def tracking_choices(self, client_id: str) -> Dict[str, Any]:
+        return onboarding.tracking_state(self.store, client_id)
+
+    # --- Phase 4: the reports view ----------------------------------------
+    def console_reports(self, client_id: str) -> Dict[str, Any]:
+        """Weekly and monthly counts from the engine's own logs. Real counts only."""
+        return daily_ops.reports(self.store, client_id)
+
+    # --- Phase 4: the Integrations Hub (simulation panel) ------------------
+    def integrations_hub(self, *, client_id: str, sample: Optional[str] = None) -> Dict[str, Any]:
+        """Run a SAMPLE vendor export through the real mapping logic and show what a live
+        sync WOULD map. Nothing here connects anywhere: no request leaves this process, no
+        QuickBooks or Xero credential exists, and the panel says so in those words.
+
+        The mapping decision is `ingest.normalize()` - the identical call a live import
+        makes - so what the panel shows is the mapper's real verdict on the sample file,
+        not a frontend illustration of it.
+        """
+        return daily_ops.integrations_hub(self.store, client_id=client_id, sample=sample)
+
+    def console_integration_samples(self) -> List[Dict[str, Any]]:
+        return daily_ops.integration_samples()

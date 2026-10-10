@@ -19,7 +19,7 @@ import json
 import sqlite3
 import unittest
 
-from engine import config, ingest
+from engine import config, ingest, onboarding
 from engine import db as dbmod
 from tests.base import EngineTestCase
 
@@ -53,6 +53,7 @@ class SpreadsheetIntakeTestCase(EngineTestCase):
 
     def registered(self, preview, **kwargs):
         self.sign_off()
+        self.attest_step3()
         options = {"uploader_id": "dana@cedar.example", "warranty_acknowledged": True,
                    "reason": "onboarding past-due file"}
         options.update(kwargs)
@@ -403,6 +404,7 @@ class TestPreviewAndCommit(SpreadsheetIntakeTestCase):
     def test_register_refuses_without_the_step3_warranty_tick(self):
         preview = self.preview(CSV_GOOD.split("\n", 1)[1])
         self.sign_off()
+        self.attest_step3()
         result = self.engine.register_ingestion_batch(preview, uploader_id="dana@cedar.example",
                                                       warranty_acknowledged=False)
         self.assertFalse(result["ok"])
@@ -415,6 +417,17 @@ class TestPreviewAndCommit(SpreadsheetIntakeTestCase):
                                                       warranty_acknowledged=True)
         self.assertFalse(result["ok"])
         self.assertEqual(result["refusal_token"], "BLOCKED_NO_WARRANTY_SIGNATURE")
+
+    def test_register_refuses_when_the_client_has_not_attested_step3(self):
+        """Phase 4: the real gate. A signed client with no Step 3 attestation on file has
+        nothing for the batch's warranty to bind to, so the registration refuses."""
+        preview = self.preview(CSV_GOOD.split("\n", 1)[1])
+        self.sign_off()
+        result = self.engine.register_ingestion_batch(preview, uploader_id="dana@cedar.example",
+                                                      warranty_acknowledged=True)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["refusal_token"], "BLOCKED_NO_STEP3_ATTESTATION")
+        self.assertEqual(len(self.engine.ingestion_batches()), 0, "no record, no batch")
 
     def test_commit_is_refused_when_the_record_does_not_match_the_preview(self):
         preview = self.preview(CSV_GOOD.split("\n", 1)[1])
@@ -448,6 +461,7 @@ class TestPreviewAndCommit(SpreadsheetIntakeTestCase):
         tampered = copy.deepcopy(preview)
         tampered["accepted_rows"][0]["raw"]["AmountDue"] = "9.00"
         self.sign_off()
+        self.attest_step3()
         result = self.engine.register_ingestion_batch(tampered, uploader_id="dana@cedar.example",
                                                       warranty_acknowledged=True)
         self.assertFalse(result["ok"])
@@ -485,6 +499,10 @@ class TestIngestionBatchRecord(SpreadsheetIntakeTestCase):
 
     def test_the_record_is_cryptographically_bound_to_the_step3_warranty_signature(self):
         preview = self.preview(CSV_GOOD.split("\n", 1)[1])
+        # Order matters and is the real one: the client attests the warranty FIRST, then
+        # signs - because the sign-off hash carries the attestation's text sha256, and a
+        # signature given before the warranty existed would not cover it.
+        self.attest_step3()
         signoff = self.sign_off()
         batch = self.registered(preview)
         record = batch["record"]
@@ -493,11 +511,21 @@ class TestIngestionBatchRecord(SpreadsheetIntakeTestCase):
         self.assertEqual(record["warranty_document_version"], config.step3_warranty()["version"])
         self.assertEqual(record["warranty_text_sha256"],
                          ingest.sha256_text(config.step3_warranty()["text"]))
+        # Phase 4: the binding names the client's OWN Step 3 attestation row, and the
+        # attestation id is inside the row's own batch_sha256 too.
+        attestation = onboarding.current_attestation(self.engine.store, "CLI-TEST",
+                                                     onboarding.ATTESTATION_STEP3)
+        self.assertEqual(record["warranty_step3_attestation_id"], attestation["attestation_id"])
+        self.assertEqual(record["warranty_step3_attestation_sha256"],
+                         attestation["attestation_sha256"])
+        self.assertIn("warranty_step3_attestation_id", ingest.batch_hash_fields_for(record))
         expected_binding = ingest.warranty_binding(
             client_id="CLI-TEST", signature_reference=signoff["signature_reference"],
             document_version=config.step3_warranty()["version"],
             text_sha256=record["warranty_text_sha256"], uploader_id="dana@cedar.example",
-            acknowledged_at_ms=record["recorded_at_ms"])
+            acknowledged_at_ms=record["recorded_at_ms"],
+            step3_attestation_id=attestation["attestation_id"],
+            step3_attestation_sha256=attestation["attestation_sha256"])
         self.assertEqual(record["warranty_binding_sha256"], expected_binding)
         self.assertEqual(record["batch_sha256"], ingest.batch_sha256(record))
         self.assertEqual(record["chain_hash"],
