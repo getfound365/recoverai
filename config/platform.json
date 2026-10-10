@@ -1,0 +1,46 @@
+{
+  "platform_account_id": "acct_1TbxU10xRANq8tnU",
+
+  "_what_this_is": "The hard pin for Milestone B. verify_milestone_b_receipt compares a receipt's account_id against this value BYTE-FOR-BYTE - no strip, no case folding, no normalisation - and raises PlatformCredentialMismatchException on any deviation, including a single byte.",
+
+  "_provenance": {
+    "verified_by": "GET /v1/account, using the account's own live key supplied by the owner, on 2026-10-07",
+    "observed": {
+      "id": "acct_1TbxU10xRANq8tnU",
+      "business_profile_name": "Profit Recovery Partners",
+      "charges_enabled": true,
+      "payouts_enabled": true,
+      "country": "US",
+      "default_currency": "usd"
+    },
+    "status": "This is an API read by the team, not an owner attestation. It is the strongest form of evidence the milestone asks for: the account naming its own id."
+  },
+
+  "_account_activity_when_read": {
+    "read_on": "2026-10-07",
+    "charges": 0,
+    "payment_intents": 0,
+    "available_usd": "0.00",
+    "pending_usd": "0.00",
+    "summary": "0 charges, 0 payment intents, $0 available, $0 pending",
+    "_why": "Read from this account's own key at the same time the pin was. This is the fact that keeps Milestone B unmet: pinning an account names it, it does not show the account ever took money. engine/gate.py reads the summary field for the honest label the demo prints, so update it only from a fresh read of this same account - a stale zero here would become a false claim."
+  },
+  "_correction_on_the_record": [
+    "The pin was briefly withdrawn on 2026-10-06 on the strength of the owner's Stripe sandboxes panel, which listed this same id under a row labelled 'Test mode'. That inference was WRONG: in Stripe's sandbox UI the test-mode environment of a live account is listed under the LIVE account's own id, because test mode is a mode of that account rather than a separate account. The separate named sandbox in that panel (acct_1TbxUF18XmnvWsvL) is a distinct account.",
+    "Reading GET /v1/account with this account's live key returns exactly this id, with charges and payouts both enabled. The id the owner supplied was correct all along; the withdrawal was the team's error."
+  ],
+
+  "_still_not_satisfied": [
+    "Pinning the account does NOT satisfy Milestone B. A receipt still needs a payment_intent_sample that resolves IN THIS ACCOUNT, livemode true, both capability booleans true, and a timestamp.",
+    "This account has never taken a live payment: 0 charges, 0 payment intents, $0 available, $0 pending (read 2026-10-07). So there is no live payment sample to cite, and the milestone cannot be recorded yet.",
+    "The $1.00 charge and $0.67 payout the team had been quoting belong to a DIFFERENT account - the platform's managed Stripe connection (404 when this account's key reads that payment intent). They are not evidence for this account."
+  ],
+
+  "_owner_decision_2026-10-07": {
+    "decision": "Use Profit Recovery Partners (acct_1TbxU10xRANq8tnU) as the fee account for now.",
+    "and": "Leave the live-billing milestone UNRECORDED until a real payment lands in it. The gate must not be talked into opening by anything else.",
+    "consequence": "Milestone B stays unmet by choice, not by omission. Every client stays STATUS_BETA_TESTER. The first genuine live payment through this account is what satisfies the milestone - not a config edit, not an assertion, and not a test."
+  },
+
+  "_never": "Never edit this value to make a receipt pass. A changed pin invalidates every receipt already bound against it and forces a fresh verification event."
+}

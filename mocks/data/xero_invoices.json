@@ -1,0 +1,52 @@
+{
+  "source_system": "Xero (simulated)",
+  "client_id": "CLI-CEDAR",
+  "exported_at": "2026-10-06T13:58:31Z",
+  "note": "Different column names again, and there is no per-row client column at all - the client id comes from the connection, not the export. CE-2004 is one of the messy ones, exactly as the QuickBooks export has: its due date came through corrupted from the client's accounting bridge and its phone number carries no resolvable NANP area code. The engine stores both facts explicitly instead of guessing, and fails closed.",
+  "invoices": [
+    {
+      "ContactID": "CE-2001",
+      "ContactName": "Theo Lindqvist",
+      "EmailAddress": "theo.lindqvist@example.com",
+      "Phone": "(303) 555-0171",
+      "Balance": "12,340.00",
+      "DueDate": "2026-04-28",
+      "Reference": "XR-5501",
+      "CurrencyCode": "USD",
+      "Status": "AUTHORISED"
+    },
+    {
+      "ContactID": "CE-2002",
+      "ContactName": "Amara Boateng",
+      "EmailAddress": "amara.boateng@example.com",
+      "Phone": "(512) 555-0166",
+      "Balance": "560.40",
+      "DueDate": "2026-08-27",
+      "Reference": "XR-5522",
+      "CurrencyCode": "USD",
+      "Status": "AUTHORISED"
+    },
+    {
+      "ContactID": "CE-2003",
+      "ContactName": "Sofia Marchetti",
+      "EmailAddress": "sofia.marchetti@example.com",
+      "Phone": "(469) 555-0155",
+      "Balance": "2,115.99",
+      "DueDate": "2026-08-01",
+      "Reference": "XR-5534",
+      "CurrencyCode": "USD",
+      "Status": "AUTHORISED"
+    },
+    {
+      "ContactID": "CE-2004",
+      "ContactName": "Nils Bergqvist",
+      "EmailAddress": "nils.bergqvist@example.com",
+      "Phone": "555-0100",
+      "Balance": "7,450.00",
+      "DueDate": "0000-00-00",
+      "Reference": "XR-5549",
+      "CurrencyCode": "USD",
+      "Status": "AUTHORISED"
+    }
+  ]
+}

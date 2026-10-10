@@ -1,0 +1,255 @@
+{
+  "rulebook_version": "1.0.0",
+  "rulebook_note": "Single source of truth for RecoverAI's tunable rules. Consumed by the Python engine as data (never as hard-coded constants) and reused verbatim by the web console. Pure JSON: no code, no comments.",
+  "calling_window": {
+    "start_local": "08:00",
+    "end_local": "21:00",
+    "inclusive_both_ends": true,
+    "time_source": "phone_area_code",
+    "applies_to_channels": [
+      "voice",
+      "sms"
+    ],
+    "on_unresolvable_local_time": "freeze",
+    "freeze_status_token": "Outside_Calling_Window"
+  },
+  "opt_out": {
+    "keywords": [
+      "STOP",
+      "Unsubscribe",
+      "Stop calling"
+    ],
+    "match": "case_insensitive_substring",
+    "scope": "global_per_debtor",
+    "on_match": "set_dnc_flag_true_and_cancel_all_runs"
+  },
+  "disclaimer": "This is an attempt to collect a debt. Any information obtained will be used for that purpose.",
+  "disclaimer_placement": "absolute_bottom_of_every_generation",
+  "disclaimer_occurrences_required": 1,
+  "aging_buckets": [
+    {
+      "state": "current",
+      "label": "Current (0-29 days since invoice)",
+      "min_days": 0,
+      "max_days": 29
+    },
+    {
+      "state": "30",
+      "label": "30+ days late",
+      "min_days": 30,
+      "max_days": 59
+    },
+    {
+      "state": "60",
+      "label": "60+ days late",
+      "min_days": 60,
+      "max_days": 89
+    },
+    {
+      "state": "90",
+      "label": "90+ days late",
+      "min_days": 90,
+      "max_days": null
+    }
+  ],
+  "aging_edge_states": {
+    "unknown": "invoice_date is missing, empty or unparseable - stored explicitly, never guessed",
+    "future": "invoice_date is after the run date - stored explicitly, never treated as aged"
+  },
+  "operating_modes": {
+    "default": "hitl",
+    "available": [
+      "hitl",
+      "full_auto"
+    ],
+    "full_auto_requires_signoff": true,
+    "hitl_requires_human_approval": true,
+    "full_auto_label": "fires drafts on generation",
+    "hitl_label": "drafts queue as Pending until a human approves"
+  },
+  "channels": {
+    "email": {
+      "simulated": true,
+      "provider": "mock/local-email",
+      "endpoint": "/mock/email/send"
+    },
+    "voice": {
+      "simulated": true,
+      "provider": "Vapi (mock)",
+      "endpoint": "/vapi/call"
+    },
+    "sms": {
+      "simulated": true,
+      "provider": "Vapi (mock)",
+      "endpoint": "/vapi/call"
+    }
+  },
+  "authorization_document": {
+    "version": "AUT-1.0",
+    "validity_days": 365,
+    "text": "I confirm that I am authorized to bind this company to automated accounts-receivable contact. I authorize RecoverAI to send past-due notices to our debtors on the channels and in the aging categories selected below, within the 8am-9pm local calling window, and I understand that every contact is logged against this sign-off."
+  },
+  "authorization_scope_options": [
+    {
+      "channel": "email",
+      "aging_state": "30",
+      "plain_english": "Email reminders for invoices 30+ days late",
+      "plain_english_prompt": "Allow email reminders for invoices 30+ days late?"
+    },
+    {
+      "channel": "email",
+      "aging_state": "60",
+      "plain_english": "Email reminders for invoices 60+ days late",
+      "plain_english_prompt": "Allow email reminders for invoices 60+ days late?"
+    },
+    {
+      "channel": "email",
+      "aging_state": "90",
+      "plain_english": "Email reminders for invoices 90+ days late",
+      "plain_english_prompt": "Allow email reminders for invoices 90+ days late?"
+    },
+    {
+      "channel": "voice",
+      "aging_state": "30",
+      "plain_english": "Automated phone calls for invoices 30+ days late",
+      "plain_english_prompt": "Allow automated phone calls for invoices 30+ days late?"
+    },
+    {
+      "channel": "voice",
+      "aging_state": "60",
+      "plain_english": "Automated phone calls for invoices 60+ days late",
+      "plain_english_prompt": "Allow automated phone calls for invoices 60+ days late?"
+    },
+    {
+      "channel": "voice",
+      "aging_state": "90",
+      "plain_english": "Automated phone calls for invoices 90+ days late",
+      "plain_english_prompt": "Allow automated phone calls for invoices 90+ days late?"
+    },
+    {
+      "channel": "sms",
+      "aging_state": "30",
+      "plain_english": "SMS reminders for invoices 30+ days late",
+      "plain_english_prompt": "Allow SMS reminders for invoices 30+ days late?"
+    },
+    {
+      "channel": "sms",
+      "aging_state": "60",
+      "plain_english": "SMS reminders for invoices 60+ days late",
+      "plain_english_prompt": "Allow SMS reminders for invoices 60+ days late?"
+    },
+    {
+      "channel": "sms",
+      "aging_state": "90",
+      "plain_english": "SMS reminders for invoices 90+ days late",
+      "plain_english_prompt": "Allow SMS reminders for invoices 90+ days late?"
+    }
+  ],
+  "guardrails": {
+    "non_bypassable_in_all_modes": [
+      "calling_window",
+      "global_dnc_opt_out",
+      "atomic_send_claim",
+      "verbatim_disclaimer"
+    ],
+    "evaluation_order_at_claim": [
+     "dnc_flag",
+     "pending_adjustment_confirmation",
+     "reopened_awaiting_audit",
+     "balance_due",
+     "calling_window",
+     "operating_mode_and_signoff",
+     "authorization_scope"
+    ],
+    "evaluation_order_note": "The order the claim transaction applies its refusals in. global_dnc_opt_out is absolute: an opt-out beats an open reopen audit, a parked balance and a zero balance. The reopen audit gate answers before the balance gate, so where both would apply the claim refuses with REOPENED_AWAITING_AUDIT; after a completed re-audit the balance gate answers normally (BLOCKED_NO_BALANCE_DUE for a zero or credit balance). Every one of these is a refusal: none can be configured off, and none is a client-caused exception.",
+    "note": "No operating mode, config flag or environment variable switches these off. They are re-evaluated inside the same transaction that writes the send claim."
+    },
+    "reopen_audit": {
+    "state": "Reopened_Awaiting_Audit",
+    "set_by": "a reversal (a bounced or refunded payment) on a record that was Paid or Partially_Paid",
+    "mandatory": true,
+    "refusal_token": "REOPENED_AWAITING_AUDIT",
+    "purged_queue": "stays purged: the runs the payment removed are never restored, no new run is created, and the sequence never restarts",
+    "un_bill": "a linked counter-entry in collections_ledger; the original collection row is never edited, so the net statement value is original + reversal",
+    "re_entry_conditions": [
+     "re-normalize the stored source row through the ingestion path (never from our own stored conclusion)",
+     "re-resolve contact data (a missing address or number is recorded as missing, never invented)",
+     "re-evaluate the calling window from the re-read phone number",
+     "re-check DNC/STOP",
+     "re-check paid status and balance",
+     "record the completed re-audit with a millisecond-UTC timestamp and the administrator who ran it"
+    ],
+    "re_entry_note": "Only a completed re-audit returns the record to normal flow. It re-enters under the client's current operating mode (hitl by default), needs a fresh human approval in hitl because any approval predates the reversal, and every guardrail applies unchanged. The source balance found by the re-audit is recorded and never applied: the ledger is the money record.",
+    "fail_closed": "no source row, an unparseable source row, a source row that no longer identifies the same debtor, or an unparseable source amount all refuse the re-audit. The refusal is recorded and NOTHING moves: the record stays in its state and stays un-claimable.",
+    "precedence_with_holds": {
+     "hold_states": [
+      "Pending_Adjustment_Confirmation",
+      "Dispute_Hold"
+     ],
+     "rule": "A reversal that lands on a record already in a hold never exits that hold. The un-bill still happens by counter-entry, the reopen audit is still opened and still has to be completed, the audit row records both states and hold_state_kept = 1, and the record stays exactly where the human put it. Only a human releases a hold: a payment signal is a fact about money, not a decision about a dispute or a parked balance.",
+     "dispute_hold_note": "Dispute_Hold cannot be stored yet - the dispute interceptor (Agent 4) is not built - but the rule already names it, so landing the interceptor cannot reintroduce the bug.",
+     "reopen_audit_on_a_held_record": "the audit still runs over the stored source row and is still recorded; the record keeps the hold and the open audit keeps refusing claims until it is completed. Resolving the hold does not satisfy the audit.",
+     "decision": "team decision, 2026-10-07"
+    }
+    },
+  "contingency_fee": {
+    "rate_percent": 20,
+    "basis_points": 2000,
+    "basis": "funds_actually_confirmed_collected",
+    "rounding_rule": "half_up_to_cent",
+    "note": "Flat 20% of funds actually collected and confirmed. No retainer, no setup fee, no per-call charge, no tiering. Computed in integer cents: fee_cents = (abs(amount_cents) * basis_points + 5000) / 10000 with integer division, i.e. round half up to the nearest cent. A reversal counter-entry carries the negated fee of the collection it reverses.",
+    "confirmation_channels": {
+      "accounting_webhook": {
+        "label": "accounting webhook",
+        "latency": "near-instant",
+        "who_attests": null
+      },
+      "delta_sync": {
+        "label": "daily delta sync",
+        "latency": "up to a day behind",
+        "who_attests": null
+      },
+      "manual_attestation": {
+        "label": "manual client attestation",
+        "latency": "whenever the client acts",
+        "who_attests": "required"
+      }
+    }
+  },
+  "spreadsheet_intake": {
+    "note": "Phase 3: the client's own CSV/Excel export is a first-class way in. It runs through the SAME alias translator and the SAME normalizer as a live vendor export - this block only holds the tokens, the advisory consumer-debt heuristic and the words the console renders. Nothing here can disable a guardrail.",
+    "source_formats": ["csv", "xlsx"],
+    "preview_inserts_nothing": "PREVIEW parses, translates and validates in memory. It writes no debtor_records row, no queue entry and no batch record. Only COMMIT writes, and only against an existing ingestion_batches record.",
+    "reason_tokens": {
+      "row_dropped": ["MISSING_DEBTOR_ID", "AMOUNT_NOT_NUMERIC", "MISSING_BALANCE", "UNPARSEABLE_DATE", "BLOCKED_NO_BALANCE_DUE", "ROW_SHAPE_MISMATCH"],
+      "row_flagged": ["MISSING_PHONE", "MISSING_EMAIL", "MISSING_INVOICE_DATE"],
+      "mapping": ["UNMAPPED_COLUMN", "DUPLICATE_TARGET_FIELD"],
+      "commit_refusal": ["BLOCKED_NO_INGESTION_BATCH", "BATCH_PREVIEW_STATE_CHANGED", "BATCH_RECORD_TAMPERED", "BLOCKED_MAPPING_ERROR", "BLOCKED_WARRANTY_NOT_ACKNOWLEDGED", "BLOCKED_NO_WARRANTY_SIGNATURE"],
+      "file_refusal": ["UNSUPPORTED_FILE_TYPE"]
+    },
+    "evaluation_order_per_row": ["MISSING_DEBTOR_ID", "AMOUNT_NOT_NUMERIC", "MISSING_BALANCE", "UNPARSEABLE_DATE", "BLOCKED_NO_BALANCE_DUE"],
+    "evaluation_order_note": "A dropped row carries exactly ONE reason token: the first check that failed, in this order. Parse failures answer before policy blocks, so a row that is both unparseable and a credit is reported as a parse failure, never silently as a credit.",
+    "consumer_debt_scan": {
+      "advisory_only": "The scanner flags and warns. It never blocks, drops, edits or reorders a row, and it is not a legal test.",
+      "policy_note": "POLICY, NOT LAW. Balances drifting under $100 is the owner-specified signal for consumer-shaped debt; the entity-identifier list and the share thresholds are the team's. The result is a warning for a human to settle, because medical/dental and similar balances are usually consumer debt and need counsel before any real campaign.",
+      "sub_100_balance_threshold_cents": 10000,
+      "sub_100_balance_share_threshold": 0.5,
+      "individual_name_share_threshold": 0.5,
+      "individual_name_token_min": 2,
+      "individual_name_token_max": 4,
+      "entity_identifiers": ["llc", "l.l.c", "inc", "incorporated", "ltd", "limited", "corp", "corporation", "co", "company", "llp", "lp", "pllc", "pc", "gmbh", "studio", "studios", "agency", "group", "partners", "designs", "design", "media", "collective", "labs", "consulting", "consultancy", "holdings", "enterprises", "associates", "bros", "brothers", "&"],
+      "signal_tokens": ["individual_name_share", "sub_100_balance_share", "individual_name_with_sub_100_balance"],
+      "warning_text": "Warning: Data footprint resembles consumer debt. RecoverAI operates strictly on B2B commercial trade debt."
+    },
+    "step3_warranty": {
+      "version": "WAR-1.0",
+      "checkbox_default": false,
+      "text": "I warrant that the contact data in this file is accurate, active and lawfully consented to contact; I understand that RecoverAI runs this data as an AS-IS beta with zero recovery guarantees; and I indemnify RecoverAI against claims arising from the accuracy of this data.",
+      "note": "Drafted by the team, not reviewed by counsel, exactly like the authorization document. The sha256 of THIS text, bound to the client's signed authorization reference, is what an ingestion_batches row carries - so the wording a batch was accepted under is recoverable byte-for-byte."
+    },
+    "batch_binding": {
+      "chain_note": "ingestion_batches is append-only and hash-chained like billing_route_verifications: chain_hash = sha256(prev_chain_hash | batch_sha256 | batch_id) in seq order, starting from GENESIS_BATCH_CHAIN_HASH in engine/ingest.py. It is TAMPER-EVIDENT, not signature-proof: it proves the record has not changed and where it sits, not who wrote it.",
+      "fingerprint_note": "preview_fingerprint = sha256 over the canonical previewed state (file sha256, client_id, format, mapping, totals, dropped rows with their tokens, the accepted source rows, the consumer-debt state). COMMIT refuses with BATCH_PREVIEW_STATE_CHANGED if the preview handed to it does not recompute to the same fingerprint as the record."
+    }
+  }
+}

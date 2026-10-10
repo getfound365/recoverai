@@ -1,0 +1,19 @@
+{
+  "clients_note": "Sandbox client directory. These are invented companies used to render the contact path on a notice; no real business is contacted anywhere in this prototype.",
+  "clients": {
+    "CLI-CEDAR": {
+      "client_id": "CLI-CEDAR",
+      "legal_name": "Cedar Ridge Dental Group",
+      "contact_email": "billing@cedar-ridge.example",
+      "contact_phone": "(617) 555-0101",
+      "billing_contact_name": "Accounts Receivable"
+    },
+    "CLI-NORTHWIND": {
+      "client_id": "CLI-NORTHWIND",
+      "legal_name": "Northwind Traders LLC",
+      "contact_email": "receivables@northwind.example",
+      "contact_phone": "(212) 555-0177",
+      "billing_contact_name": "Billing Department"
+    }
+  }
+}

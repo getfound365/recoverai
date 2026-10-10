@@ -1,0 +1,15 @@
+{
+  "aliases_note": "Agent 1's translator table. Every client export is messy in its own way; each target field lists the source column names we accept, matched case-insensitively and ignoring punctuation/underscores. Consumed as data by engine/ingest.py.",
+  "target_fields": {
+    "debtor_id": ["debtor_id", "Cust_ID", "CustomerID", "ContactID", "ClientRef", "Account_Number", "Customer_Ref"],
+    "client_id": ["client_id", "ClientID", "Client", "Company_ID", "Tenant_ID", "OrgID"],
+    "name": ["Cust_Name", "Customer Name", "ContactName", "Name", "CustomerName", "Debtor"],
+    "email": ["customer_email", "EmailAddress", "Email", "Cust_Email", "BillingEmail"],
+    "phone": ["PhoneNumber", "Phone", "Cust_Phone", "Mobile", "PrimaryPhone"],
+    "balance_owed": ["AmountDue", "Amount Due", "Balance", "Balance Due", "Amount_Owed", "Amount Owed", "Total", "Amount", "Outstanding", "Outstanding Balance"],
+    "invoice_date": ["Inv_Date", "DueDate", "InvoiceDate", "Date", "Invoice_Date", "IssueDate"],
+    "invoice_number": ["InvoiceNumber", "Inv_No", "InvoiceNo", "DocNumber", "Invoice_Ref", "Reference", "Number"]
+  },
+  "aging_reference_field": "invoice_date",
+  "unmapped_policy": "Unknown source columns are kept verbatim in debtor_records.raw_record and reported in the mapping summary as unmapped; no field is ever silently dropped."
+}

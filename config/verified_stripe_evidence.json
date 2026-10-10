@@ -1,0 +1,86 @@
+{
+  "_what_this_file_is": "Evidence actually read back from Stripe by the team with read-only API calls, recorded verbatim. The gate treats a payment-intent id present here as an id we have really seen. Anything not present here must not be accepted as evidence. This is a list of readings, not an assertion of capability.",
+  "_read_by": "agent-lead (read-only). The engine itself holds no Stripe credentials.",
+
+  "_account_attribution_is_the_point": "Two different Stripe accounts are involved and they must never be conflated. (1) acct_1TbxU10xRANq8tnU 'Profit Recovery Partners' is the PINNED account for Milestone B. (2) The platform's managed Stripe connection - the one the team's finance view reads - is a DIFFERENT account whose id we cannot see. Evidence from one is not evidence for the other.",
+
+  "_known_gaps": [
+    "The pinned account has NO live payment to cite: 0 charges, 0 payment intents, $0 available, $0 pending as of 2026-10-07. The Milestone B receipt requires a payment_intent_sample that resolves in the pinned account, so the receipt cannot yet be recorded honestly.",
+    "The platform-connected account's id is unknown and unreadable with our tooling, so no receipt can pin against it either.",
+    "TO FIX: the validator should require that the receipt's payment_intent_sample resolves in the PINNED account, not merely that the id appears somewhere in this file. Until then, the entry below must be treated as carrying an explicit account exclusion."
+  ],
+
+  "account_reads": [
+    {
+      "kind": "account",
+      "account_id": "acct_1TbxU10xRANq8tnU",
+      "read_at_utc": "2026-10-07T20:26:00Z",
+      "source": "GET /v1/account with the account's own live key",
+      "observed": {
+        "id": "acct_1TbxU10xRANq8tnU",
+        "business_profile_name": "Profit Recovery Partners",
+        "charges_enabled": true,
+        "payouts_enabled": true,
+        "country": "US",
+        "default_currency": "usd",
+        "balance_available_cents": 0,
+        "balance_pending_cents": 0,
+        "payment_intent_count": 0,
+        "charge_count": 0
+      }
+    }
+  ],
+
+  "evidence": [
+    {
+      "kind": "payment_intent",
+      "id": "pi_3U8DS4DtdnNSJFla0uMRTHFW",
+      "account": "NOT the pinned account - reading this id with acct_1TbxU10xRANq8tnU's own live key returns HTTP 404",
+      "observed_in": "the platform's managed Stripe connection (account id unknown to us)",
+      "read_at_utc": "2026-10-06T16:23:12Z",
+      "source": "GET /v1/payment_intents/pi_3U8DS4DtdnNSJFla0uMRTHFW through the platform's managed Stripe access",
+      "observed": {
+        "livemode": true,
+        "status": "succeeded",
+        "amount": 100,
+        "amount_received": 100,
+        "currency": "usd",
+        "created_epoch": 1787637796,
+        "created_utc": "2026-08-25T06:03:16Z",
+        "latest_charge": "ch_3U8DS4DtdnNSJFla0uMRTHFW"
+      },
+      "usable_as_milestone_b_evidence_for_the_pinned_account": false
+    },
+    {
+      "kind": "charge_transaction",
+      "id": "txn_3U8DS4DtdnNSJFla0aILM8WE",
+      "account": "the platform's managed Stripe connection (not the pinned account)",
+      "read_at_utc": "2026-10-06T16:23:12Z",
+      "source": "finance overview (live Stripe account read)",
+      "observed": {
+        "type": "charge",
+        "amount_cents": 100,
+        "currency": "usd",
+        "customer": "Tyler",
+        "payment_intent": "pi_3U8DS4DtdnNSJFla0uMRTHFW",
+        "created_utc": "2026-08-25T06:03:17Z"
+      }
+    },
+    {
+      "kind": "payout_transaction",
+      "id": "txn_1U8VHRDtdnNSJFlaM7SThTgk",
+      "account": "the platform's managed Stripe connection (not the pinned account)",
+      "read_at_utc": "2026-10-06T16:23:12Z",
+      "source": "finance overview (live Stripe account read)",
+      "observed": {
+        "type": "payout",
+        "amount_cents": -67,
+        "currency": "usd",
+        "description": "STRIPE PAYOUT",
+        "created_utc": "2026-08-26T01:05:28Z"
+      }
+    }
+  ],
+
+  "_collection_reality_check": "This business has collected $0 to date. The $1.00 charge and $0.67 payout above are unrelated earlier activity on a different account, not RecoverAI collections. Nothing here may be presented as revenue or as a performance result."
+}

@@ -1,0 +1,52 @@
+{
+  "source_system": "QuickBooks Online (simulated)",
+  "client_id": "CLI-NORTHWIND",
+  "exported_at": "2026-10-06T13:58:02Z",
+  "note": "Column names are deliberately messy, exactly like a real QuickBooks export. Every one of them is translated by engine/ingest.py into the normalized schema.",
+  "invoices": [
+    {
+      "Cust_ID": "NW-1001",
+      "Cust_Name": "Marcus Whitfield",
+      "customer_email": "marcus.whitfield@example.com",
+      "PhoneNumber": "(212) 555-0143",
+      "AmountDue": "$4,820.50",
+      "Inv_Date": "2026-06-15",
+      "InvoiceNumber": "INV-2041",
+      "Terms": "Net 30",
+      "Memo": "roof repair - phase 2"
+    },
+    {
+      "Cust_ID": "NW-1002",
+      "Cust_Name": "Priya Raman",
+      "customer_email": "priya.raman@example.com",
+      "PhoneNumber": "(808) 555-0119",
+      "AmountDue": "1750.00",
+      "Inv_Date": "2026-07-20",
+      "InvoiceNumber": "INV-2067",
+      "Terms": "Net 30",
+      "Memo": ""
+    },
+    {
+      "Cust_ID": "NW-1003",
+      "Cust_Name": "Luis Herrera",
+      "customer_email": "luis.herrera@example.com",
+      "PhoneNumber": "202-555-0182",
+      "AmountDue": "(320.75)",
+      "Inv_Date": "2026-08-01",
+      "InvoiceNumber": "INV-2073",
+      "Terms": "Net 30",
+      "Memo": "credit note applied, balance shown as negative in QBO export"
+    },
+    {
+      "Cust_ID": "NW-1004",
+      "Cust_Name": "Ravi Chandrasekhar",
+      "customer_email": "ravi.c@example.com",
+      "PhoneNumber": "555-0100",
+      "AmountDue": "9025",
+      "Inv_Date": "not-a-date",
+      "InvoiceNumber": "INV-2088",
+      "Terms": "Net 30",
+      "Memo": "date field came through corrupted from the client's ERP bridge"
+    }
+  ]
+}

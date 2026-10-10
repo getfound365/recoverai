@@ -1,0 +1,19 @@
+Cust_ID,Cust_Name,AmountDue,Inv_Date,Email,Cust_Phone,Terms
+AC-1001,Cedar Lane Design Studio,4820.50,2026-06-15,ap@cedarlane.example,(212) 555-0143,Net 30
+AC-1002,Northwind Freight LLC,12340.00,2026-06-16,ap@northwind.example,(303) 555-0144,Net 30
+AC-1003,Harbor & Vale Creative Co,2210.75,2026-07-02,ap@harborvale.example,(415) 555-0110,Net 45
+AC-1004,Ridgeway Digital Media Inc,7600.00,2026-07-09,,(646) 555-0121,Net 30
+AC-1005,Sunset Avenue Studio,1150.00,2026-07-20,billing@sunsetave.example,,Net 30
+AC-1006,Meridian Design Group,twelve hundred,2026-07-22,ap@meridian.example,(206) 555-0132,Net 30
+AC-1007,Copperline Agency,980.00,last tuesday,ap@copperline.example,(312) 555-0143,Net 30
+AC-1008,Lakeshore Brand Partners,0.00,2026-08-01,ap@lakeshore.example,(617) 555-0155,Net 30
+AC-1009,Quill Compass LLP,,2026-08-03,ap@quillcompass.example,(718) 555-0166,Net 30
+,Missing Id Design Co,450.00,2026-08-04,ap@missingid.example,(212) 555-0170,Net 30
+AC-1101,Whitfield Marcus,42.00,2026-08-05,,(212) 555-0177,Net 30
+AC-1102,Priya Raman,68.50,2026-08-06,,(212) 555-0188,Net 30
+AC-1103,Luis Herrera,25.00,2026-08-07,,(212) 555-0199,Net 30
+AC-1104,Cedar Lane Design Studio,55.00,2026-08-08,ap@cedarlane.example,(212) 555-0143,Net 30
+AC-1105,Marta Kowalski,74.00,2026-08-09,,(212) 555-0200,Net 30
+AC-1106,Devon Price,31.50,2026-08-10,,(212) 555-0211,Net 30
+AC-1107,Sofia Marchetti,19.99,2026-08-11,,(212) 555-0222,Net 30
+AC-1200,Short Row Corp,300.00,
