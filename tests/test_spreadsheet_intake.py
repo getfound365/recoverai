@@ -693,3 +693,88 @@ class TestPayloadHygiene(SpreadsheetIntakeTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheConsoleSandboxPathEndToEnd(unittest.TestCase):
+    """The console's REAL path: the bridge's own fixture client, preview -> register ->
+    commit, against a throwaway console store.
+
+    Why this is a test and not a smoke script: the Step 3 gate made `register` refuse for a
+    client with no recorded attestation (`BLOCKED_NO_STEP3_ATTESTATION`) - correct, and it
+    left the console's upload wizard unable to commit anything at all, because the sandbox
+    fixture has no human to tick the box. The fixture now walks the ladder itself (warranty
+    first, then the signature that covers it) and this proves the whole path still runs:
+    preview parses, register accepts, commit writes rows, and the chain verifies.
+    """
+
+    def setUp(self):
+        import os
+        import shutil
+        import tempfile
+        from pathlib import Path
+        from engine import clock
+        self._os, self._shutil, self._Path, self._clock = os, shutil, Path, clock
+        self.tmp = Path(tempfile.mkdtemp(prefix="recoverai-bridge-"))
+        self.env = {"RECOVERAI_CONSOLE_DB": str(self.tmp / "console.db"),
+                    "RECOVERAI_CONSOLE_AUDIT": str(self.tmp / "audit.jsonl"),
+                    "RECOVERAI_CONSOLE_RUNS": str(self.tmp / "runs.json")}
+        self._saved = {key: os.environ.get(key) for key in self.env}
+        os.environ.update(self.env)
+        clock.set_fake_now("2026-10-06T14:00:00Z")
+
+    def tearDown(self):
+        for key, value in self._saved.items():
+            if value is None:
+                self._os.environ.pop(key, None)
+            else:
+                self._os.environ[key] = value
+        self._clock.set_fake_now(None)
+        self._shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_preview_register_and_commit_run_end_to_end_through_the_bridge(self):
+        from tools import console_bridge
+        sample = (self._Path(__file__).resolve().parent.parent
+                  / "samples" / "spreadsheet" / "agency_past_due_sample.csv")
+        preview = console_bridge.handle({"op": "preview", "file_name": sample.name,
+                                         "content_text": sample.read_text(),
+                                         "uploader_id": "test@example.com"})
+        self.assertTrue(preview["bridge_ok"], preview)
+        payload = preview["payload"]
+        self.assertTrue(payload["preview_ok"], payload.get("refusal_token"))
+        self.assertTrue(payload["accepted_rows"], "no row was accepted from the sample file")
+
+        registered = console_bridge.handle({"op": "register", "preview": payload,
+                                            "warranty_acknowledged": True,
+                                            "uploader_id": "test@example.com", "who": "test"})
+        self.assertTrue(registered["bridge_ok"], registered)
+        self.assertTrue(registered["payload"]["ok"], registered["payload"])
+        batch_id = registered["payload"]["batch_id"]
+
+        committed = console_bridge.handle({"op": "commit", "preview": payload,
+                                           "batch_id": batch_id, "who": "test"})
+        self.assertTrue(committed["bridge_ok"], committed)
+        self.assertTrue(committed["payload"]["ok"], committed["payload"])
+        self.assertGreater(committed["payload"]["rows_written"], 0)
+
+        verify = console_bridge.handle({"op": "verify"})
+        self.assertTrue(verify["payload"]["ok"], verify["payload"])
+        self.assertEqual(verify["payload"]["legacy_rows"], 0)
+        self.assertEqual(verify["payload"]["step3_gated_rows"], 1)
+
+    def test_the_sandbox_bootstrap_attests_step3_and_the_signature_covers_it(self):
+        from tools import console_bridge
+        from engine import onboarding
+        info = console_bridge.handle({"op": "bootstrap"})["payload"]
+        self.assertTrue(info["sandbox_fixture"])
+        self.assertTrue(info["created_step3_attestation"])
+        engine = console_bridge._engine()
+        try:
+            attestation = onboarding.current_attestation(
+                engine.store, console_bridge.SANDBOX_CLIENT_ID,
+                onboarding.ATTESTATION_STEP3)
+            self.assertIsNotNone(attestation, "the fixture client has no Step 3 attestation")
+            settings = engine.settings(console_bridge.SANDBOX_CLIENT_ID)
+            self.assertEqual(str(settings["step3_attestation_id"]),
+                             str(attestation["attestation_id"]))
+        finally:
+            engine.close()

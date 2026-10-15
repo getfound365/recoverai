@@ -91,14 +91,47 @@ def _engine():
 
 
 def _bootstrap(engine) -> dict:
-    """Make sure the sandbox client exists with a usable sign-off on file. Idempotent,
-    and honest about what it did: it writes an audit line saying the signature is a
-    sandbox fixture, never a client's."""
+    """Make sure the sandbox client exists with a usable sign-off AND a Step 3 attestation
+    on file. Idempotent, and honest about what it did: it writes an audit line saying both
+    are sandbox fixtures, never a client's.
+
+    Why the attestation belongs here: since the real Step 3 gate landed, the intake refuses
+    to register a batch for a client with no recorded attestation
+    (`BLOCKED_NO_STEP3_ATTESTATION`) - which is exactly right, and it would leave the
+    console's upload wizard permanently unable to commit, because this fixture client has no
+    human to tick the box. So the fixture ticks its own, labelled as a fixture, in the order
+    the real ladder runs: the warranty first, then the signature that covers it. The engine
+    gate is untouched - a real client still has to attest before its files can be
+    registered.
+    """
     from engine import config, onboarding  # noqa: PLC0415
     row = onboarding.fetch_settings(engine.store, SANDBOX_CLIENT_ID)
     created_signoff = False
     created_client = row is None
-    if not row or not onboarding.signoff_state(row)["valid"]:
+    created_attestation = False
+    if onboarding.current_attestation(engine.store, SANDBOX_CLIENT_ID,
+                                      onboarding.ATTESTATION_STEP3) is None:
+        result = engine.record_step3_attestation(
+            SANDBOX_CLIENT_ID, True, "console-bridge-bootstrap",
+            source="console-bridge-bootstrap",
+            note=("sandbox console fixture: a simulated Step 3 attestation so the upload "
+                  "wizard has a warranty to bind a batch to. No real client, no real "
+                  "contact data and no real warranty exists."))
+        created_attestation = bool(result.get("ok"))
+        if not created_attestation:
+            raise RuntimeError(f"the sandbox Step 3 fixture attestation was refused: {result}")
+        engine.audit.record("onboarding_attestation_recorded", client_id=SANDBOX_CLIENT_ID,
+                            attestation_type=onboarding.ATTESTATION_STEP3,
+                            reason=("sandbox console fixture: a simulated Step 3 warranty "
+                                    "attestation. No real client exists."),
+                            bootstrapped_by="tools/console_bridge.py")
+    # The sign-off must cover the attestation that is on file: a fixture signature given
+    # before the warranty existed does not, so re-take it rather than let the console show
+    # a signature whose binding the ladder would never have produced.
+    attestation = onboarding.current_attestation(engine.store, SANDBOX_CLIENT_ID,
+                                                 onboarding.ATTESTATION_STEP3)
+    if (not row or not onboarding.signoff_state(row)["valid"]
+            or str(row.get("step3_attestation_id") or "") != str(attestation["attestation_id"])):
         scope_pairs = [[o["channel"], str(o["aging_state"])] for o in config.scope_options()]
         engine.capture_signoff(SANDBOX_CLIENT_ID, SANDBOX_SIGNER_NAME, SANDBOX_SIGNER_TITLE,
                                who="console-bridge-bootstrap", scope_pairs=scope_pairs)
@@ -110,7 +143,8 @@ def _bootstrap(engine) -> dict:
                                    "and no real authorization exists.",
                             bootstrapped_by="tools/console_bridge.py")
     return {"client_id": SANDBOX_CLIENT_ID, "created_client": created_client,
-            "created_signoff": created_signoff, "sandbox_fixture": True}
+            "created_signoff": created_signoff,
+            "created_step3_attestation": created_attestation, "sandbox_fixture": True}
 
 
 def _status(engine) -> dict:
@@ -235,14 +269,31 @@ def op_register(engine, request: dict) -> dict:
 
 
 def op_commit(engine, request: dict) -> dict:
+    """Start the import of a registered batch.
+
+    `uploader_id` here is NOT defaulted to a made-up name. It is handed through only when
+    the caller actually hands one, and passed as None when it does not - because that is
+    exactly the engine's own contract (`commit_spreadsheet` compares `uploader_id` against
+    the batch record only `if uploader_id`, and the batch record is the authoritative
+    statement of who handed the file over; `register` already required it). Inventing a
+    placeholder identity here - which is what a `"console-operator"` fallback did - put a
+    name in front of the engine that no human had given, and the honest result was a
+    refusal (`BATCH_PREVIEW_STATE_CHANGED`) against the batch's real uploader. The console
+    itself always sends the uploader it collected; the drift check stays live and still
+    fires for any caller that hands a name that is not the batch's.
+
+    `who` stays the acting-operator label for the audit line, and is the same default the
+    preview/register ops use, so a batch's trail reads consistently end to end.
+    """
     preview = request.get("preview")
     if not isinstance(preview, dict):
         raise ValueError("commit needs the preview payload the batch was raised from")
     if not str(request.get("batch_id") or "").strip():
         raise ValueError("commit needs the batch_id of the registered batch")
+    handed_uploader = str(request.get("uploader_id") or "").strip() or None
     return engine.commit_spreadsheet(
         preview, batch_id=str(request["batch_id"]),
-        uploader_id=str(request.get("uploader_id") or "console-operator"),
+        uploader_id=handed_uploader,
         who=str(request.get("who") or "console-operator"))
 
 
@@ -263,25 +314,37 @@ def op_sample(engine, request: dict) -> dict:
 def op_vocabulary(engine, request: dict) -> dict:
     """The reason-token vocabulary and the per-row evaluation order, read out of the
     rulebook. The console renders its legend from this, so a legend can never drift from
-    the tokens the engine actually emits."""
+    the tokens the engine actually emits.
+
+    It also carries Step 2's channel utility rate sheet (MODEL 2): internal operational
+    metrics, NOT client charges. It is here because both of the console's reference surfaces
+    read this op, and the rate block is read from the rulebook at call time - there is no
+    rate literal anywhere in the view code."""
     from engine import config  # noqa: PLC0415
     block = config.load_rulebook()["spreadsheet_intake"]
     return {"reason_tokens": block["reason_tokens"],
             "evaluation_order_per_row": block["evaluation_order_per_row"],
             "evaluation_order_note": block["evaluation_order_note"],
-            "source_formats": block["source_formats"]}
+            "source_formats": block["source_formats"],
+            "channel_utility_rates": config.channel_utility_rates()}
 
 
 def op_warranty(engine, request: dict) -> dict:
     """The exact Step 3 warranty the engine binds a batch to: its version, its wording,
     and the sha256 of that wording. The console renders these bytes and shows the hash,
-    so the checkbox a human ticks is the text the batch hash covers."""
+    so the checkbox a human ticks is the text the batch hash covers.
+
+    The Step 2 channel utility rate sheet rides along (MODEL 2, internal operational
+    metrics and NOT client charges) because this is the op the transparency surface is
+    built on: one payload tells a client both what we bind them to and what a unit of each
+    channel costs us, straight from the rulebook."""
     from engine import config, ingest  # noqa: PLC0415
     warranty = config.step3_warranty()
     text = str(warranty["text"])
     return {"document_version": warranty["version"], "text": text,
             "text_sha256": ingest.sha256_text(text),
-            "acknowledgement_present": bool(warranty.get("acknowledgement"))}
+            "acknowledgement_present": bool(warranty.get("acknowledgement")),
+            "channel_utility_rates": config.channel_utility_rates()}
 
 
 # --- daily operations (Phase 3, pass 3) -------------------------------------

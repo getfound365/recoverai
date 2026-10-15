@@ -302,7 +302,32 @@
       "text": "I understand how RecoverAI tracks collections and how the 20% fee is calculated: RecoverAI never touches my money and never has access to my bank accounts; a fee is charged only on funds actually collected and confirmed, at a flat 20% with no retainer, setup fee, per-call charge or tiering; and every fee line cites the confirmation source it came from.",
       "tooltip": "We never touch your money. When your debtor pays you, we read the balance drop and log the 20%.",
       "invoice_modification_warning": "If you edit an invoice amount after a payment has been claimed against it, the engine cannot tell a payment from a correction: the record parks in Pending_Adjustment_Confirmation, every scheduled contact for that debtor freezes, and nothing is billed until a human says which it was. A confirmed payment is billable; an adjustment closes the record with no fee.",
-      "acknowledgement_rule": "Mandatory before proceeding and unselected by default. It is recorded against the client in the same append-only onboarding_attestations table as the Step 3 warranty, with its own version, its exact text and the sha256 of that text; the wizard will not advance past this step until it is ticked, and the Step 3 gate stays shut until the Step 3 attestation is recorded."
+      "acknowledgement_rule": "Mandatory before proceeding and unselected by default. It is recorded against the client in the same append-only onboarding_attestations table as the Step 3 warranty, with its own version, its exact text and the sha256 of that text; the wizard will not advance past this step until it is ticked, and the Step 3 gate stays shut until the Step 3 attestation is recorded.",
+      "channel_utility_rates": {
+        "model": "MODEL_2_INTERNAL_OPERATIONAL_METRICS",
+        "label": "Channel Utility Rates (Internal Operational Metrics, Not Client Charges)",
+        "currency": "USD",
+        "unit": "USD",
+        "order": [
+          "email",
+          "sms_segment",
+          "voice_minute"
+        ],
+        "rates": {
+          "email": 0.0,
+          "sms_segment": 0.05,
+          "voice_minute": 0.2
+        },
+        "unit_notes": {
+          "email": "per outbound email sent",
+          "sms_segment": "per 160-character SMS segment",
+          "voice_minute": "per connected voice minute"
+        },
+        "not_client_charges": true,
+        "owner_set": true,
+        "plain_english": "What one unit of each channel costs us to operate. They are internal operational metrics, not client charges: they never appear on a client invoice and no client is ever billed per email, per SMS segment or per minute.",
+        "rule": "MODEL 2 (owner-confirmed): these are internal operational metrics, NOT client charges. The only thing a client ever pays RecoverAI is the flat 20% contingency fee on funds actually collected. These figures must never be rendered as, or summed into, a client invoice, a fee line or a statement total; they are read from this file by the engine and surfaced through the console's vocabulary and warranty payloads, and nowhere else."
+      }
     }
   }
 }

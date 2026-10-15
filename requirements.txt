@@ -1,0 +1,14 @@
+# RecoverAI engine dependencies.
+#
+# The engine, the demo and every test run on the standard library alone, with ONE
+# exception: reading a client's binary .xlsx upload (engine/ingest.py -> read_xlsx_bytes)
+# needs openpyxl. It is imported lazily, so a missing copy produces a plain
+# FILE_UNREADABLE refusal naming the install command instead of an ImportError - but the
+# .xlsx intake tests (`tests/test_spreadsheet_intake.py`, TestFileParsing) build and read a
+# real workbook, so a suite run on a machine without it goes red. That is what happened
+# here; the package was installed and this file records it so the next environment can
+# reproduce the green suite in one command.
+#
+# The sandbox Python is an externally-managed environment (PEP 668), so pip needs the flag:
+#   python3 -m pip install --break-system-packages -r requirements.txt
+openpyxl>=3.1,<4

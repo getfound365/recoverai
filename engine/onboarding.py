@@ -37,31 +37,126 @@ from .audit import AuditLog
 
 
 # --- sign-off ---------------------------------------------------------------
+#: The signature-reference matrix: the components the digest loops over, in the fixed
+#: order it loops over them. The ORDER IS PART OF THE CONTRACT - it is what makes the
+#: digest reproducible by a third party - so this tuple is the single place the matrix is
+#: written down, and `signature_covers()` renders it for the console.
+#:
+#: The four BOUND components come first, in this order: who is bound (`client_id`), the
+#: boundaries the client authorized (`communication_boundaries`), the fee-tracking consent
+#: they selected (`tracking_consent_selection`) and the RAW warranty text version string
+#: (`warranty_text_version`) - the version string that was in force, not a hash of it, so
+#: a reader can compare it against the warranty text by eye. The warranty's text sha256
+#: travels beside its version because the version alone does not pin the bytes, and the
+#: signer's own identity and the timestamp close the matrix.
+#:
+#: The digest of these components, and of nothing else, is what is pinned to the client's
+#: configuration row (`client_autonomy_settings.signature_reference`).
+SIGNATURE_REFERENCE_COMPONENTS: tuple[str, ...] = (
+    "client_id",
+    "communication_boundaries",
+    "tracking_consent_selection",
+    "warranty_text_version",
+    "warranty_text_sha256",
+    "signer_name",
+    "signer_title",
+    "signed_timestamp",
+)
+
+#: Segment separator. A unit separator cannot appear in any component's value, so no
+#: combination of values can be read as a different combination of values.
+_SEGMENT_SEP = "\x1f"
+
+#: What the warranty-bytes component carries when the client has attested no Step 3
+#: warranty yet. A documented sentinel rather than an empty segment: a hole in the matrix
+#: would make the digest impossible to re-derive, which is the one thing it must support.
+NO_WARRANTY_ATTESTATION = "none"
+
+#: Plain-English names, for the console. Keyed by the matrix's own component names, and
+#: `signature_covers()` walks the matrix - so a component added without a label fails loudly
+#: rather than silently shortening the sentence a client is shown.
+SIGNATURE_COMPONENT_LABELS: Dict[str, str] = {
+    "client_id": "client_id",
+    "communication_boundaries": ("communication_boundaries (the authorization document version "
+                                 "plus the authorized channel x aging-state pairs)"),
+    "tracking_consent_selection": "tracking_consent_selection (step 1: where we look)",
+    "warranty_text_version": "warranty_text_version (step 3: the raw version string in force)",
+    "warranty_text_sha256": "warranty_text_sha256 (step 3: the sha256 of the attested text)",
+    "signer_name": "signer_name",
+    "signer_title": "signer_title",
+    "signed_timestamp": "signed_timestamp",
+}
+
+
+def communication_boundaries_token(document_version: str,
+                                   scope_pairs: Optional[Sequence[Sequence[str]]] = None) -> str:
+    """The boundaries the client authorized, as one canonical, order-independent token:
+    the authorization document version plus every channel x aging-state pair it covers.
+
+    Canonical means the same set of ticks always produces the same token regardless of the
+    order the wizard sent them in (`normalize_scope` sorts), and a single extra tick - or a
+    change to the document that describes the boundaries - produces a different one.
+    """
+    pairs = sorted({(str(c), str(a)) for c, a in (scope_pairs or [])}, key=lambda p: (p[1], p[0]))
+    body = ",".join(f"{c}:{a}" for c, a in pairs)
+    return f"{document_version}#{body}"
+
+
+def compose_signature_reference(components: Dict[str, Any]) -> str:
+    """The digest itself: loop over `SIGNATURE_REFERENCE_COMPONENTS`, in order, and hash.
+
+    Every component must be present and non-empty. A missing component is a programming
+    error, not something to paper over with an empty segment: a digest computed over a
+    hole is a digest that cannot be re-derived, and the whole value of this reference is
+    that a third party can re-derive it.
+    """
+    missing = [k for k in SIGNATURE_REFERENCE_COMPONENTS
+               if components.get(k) in (None, "")]
+    if missing:
+        raise ValueError(f"signature reference is missing components: {missing}; "
+                         f"the matrix is {list(SIGNATURE_REFERENCE_COMPONENTS)}")
+    segments = [f"{key}={components[key]}" for key in SIGNATURE_REFERENCE_COMPONENTS]
+    return "sha256:" + hashlib.sha256(_SEGMENT_SEP.join(segments).encode("utf-8")).hexdigest()
+
+
 def compute_signature_reference(client_id: str, signer_name: str, signer_title: str,
                                 document_version: str, timestamp: str,
                                 tracking_mode: Optional[str] = None,
-                                step3_attestation_sha256: Optional[str] = None) -> str:
+                                step3_attestation_sha256: Optional[str] = None,
+                                scope_pairs: Optional[Sequence[Sequence[str]]] = None,
+                                warranty_text_version: Optional[str] = None) -> str:
     """The signature reference: sha256 over the bytes the client actually agreed to.
 
-    The last two segments are optional so a reference computed without them stays exactly
-    what it always was. When they are present they are part of the hash - which is the
-    point: the fee-tracking choice and the Step 3 warranty text are covered by the
-    signature, not merely recorded beside it.
+    A thin, backwards-compatible front door onto `compose_signature_reference`: the
+    positional arguments are unchanged, and the wider matrix is filled in here. The
+    fee-tracking consent, the communication boundaries and the Step 3 warranty version are
+    IN the hash - not recorded beside it - because a signature that does not describe the
+    arrangement is not a signature for that arrangement.
     """
-    parts = [client_id, signer_name, signer_title, document_version]
-    if tracking_mode is not None:
-        parts.append(f"tracking_mode={tracking_mode}")
-    if step3_attestation_sha256 is not None:
-        parts.append(f"step3_attestation_sha256={step3_attestation_sha256}")
-    parts.append(timestamp)
-    return "sha256:" + hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+    if warranty_text_version is None:
+        # the version in force: the client's own attested row when the caller has one,
+        # otherwise the warranty text the rulebook currently ships
+        warranty_text_version = str(config.step3_warranty()["version"])
+    return compose_signature_reference({
+        "client_id": str(client_id),
+        "communication_boundaries": communication_boundaries_token(document_version, scope_pairs),
+        "tracking_consent_selection": (str(tracking_mode) if tracking_mode is not None
+                                       else str(config.default_fee_tracking_mode())),
+        "warranty_text_version": str(warranty_text_version),
+        "warranty_text_sha256": str(step3_attestation_sha256 or NO_WARRANTY_ATTESTATION),
+        "signer_name": str(signer_name),
+        "signer_title": str(signer_title),
+        "signed_timestamp": str(timestamp),
+    })
 
 
 def signature_covers() -> List[str]:
-    """The fields the signature reference covers, for the console to render verbatim."""
-    return ["client_id", "signer_name", "signer_title", "authorization_document_version",
-            "fee_tracking_mode (step 1)", "step3_attestation_text_sha256 (step 3)",
-            "signed_timestamp"]
+    """The fields the signature reference covers, rendered straight from the matrix.
+
+    Read from `SIGNATURE_REFERENCE_COMPONENTS`, so the list the console shows a client can
+    never drift from the components the digest actually loops over.
+    """
+    return [SIGNATURE_COMPONENT_LABELS[key] for key in SIGNATURE_REFERENCE_COMPONENTS]
 
 
 def valid_scope_pairs() -> set[tuple[str, str]]:
@@ -171,10 +266,18 @@ def capture_signoff(store, client_id: str, signer_name: str, signer_title: str,
         raise ValueError(f"unknown fee-tracking mode {chosen_tracking!r}; the rulebook knows "
                          f"{config.fee_tracking_mode_ids()}")
     step3 = current_attestation(store, client_id, ATTESTATION_STEP3)
+    # The boundaries are passed as the scope the signer actually ticked, and the warranty
+    # version as the RAW version string on file (the client's attested row when there is
+    # one, else the version the rulebook ships). Both are components of the reference, so a
+    # sign-off cannot be silently reused for a different set of boundaries.
+    warranty_version = (str(step3["document_version"]) if step3
+                        else str(config.step3_warranty()["version"]))
     signature_reference = compute_signature_reference(
         client_id, name, title, document_version, timestamp,
         tracking_mode=chosen_tracking,
-        step3_attestation_sha256=(str(step3["text_sha256"]) if step3 else None))
+        step3_attestation_sha256=(str(step3["text_sha256"]) if step3 else None),
+        scope_pairs=scope["pairs"],
+        warranty_text_version=warranty_version)
     days = validity_days if validity_days is not None else int(config.authorization_document()["validity_days"])
     expires_at = clock.iso(clock.plus(days=days, base=now or clock.now_utc()))
 
@@ -210,6 +313,12 @@ def capture_signoff(store, client_id: str, signer_name: str, signer_title: str,
         "operating_mode_after_signoff": fetch_settings(store, client_id)["operating_mode"],
         # the hash binding, stated as what it is: which bytes the reference covers
         "signature_binding": {
+            "components": list(SIGNATURE_REFERENCE_COMPONENTS),
+            "matrix_order": list(SIGNATURE_REFERENCE_COMPONENTS),
+            "communication_boundaries": communication_boundaries_token(document_version,
+                                                                       scope["pairs"]),
+            "tracking_consent_selection": chosen_tracking,
+            "warranty_text_version": warranty_version,
             "tracking_mode": chosen_tracking,
             "step3_attestation_id": (str(step3["attestation_id"]) if step3 else None),
             "step3_attestation_text_sha256": (str(step3["text_sha256"]) if step3 else None),

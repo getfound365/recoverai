@@ -174,6 +174,31 @@ def step2_acknowledgement() -> Dict[str, Any]:
     return onboarding()["step2_acknowledgement"]
 
 
+def channel_utility_rates() -> Dict[str, Any]:
+    """Step 2's channel utility rate sheet (MODEL 2, owner-confirmed).
+
+    Internal operational metrics - what one unit of each channel costs us to run - and NOT
+    client charges. The three rates and their exact label live in the rulebook, so the
+    console renders whatever this file says and a rate is never a literal in view code.
+    Nothing in the billing path may read this: the only money a client is charged is the
+    flat contingency fee on funds actually collected.
+    """
+    block = step2_acknowledgement().get("channel_utility_rates")
+    if not block:
+        raise KeyError("the rulebook has no onboarding.step2_acknowledgement."
+                       "channel_utility_rates block: the Step 2 rate sheet is missing")
+    return dict(block)
+
+
+def channel_utility_rate(channel_key: str) -> float:
+    """One unit rate by key (email / sms_segment / voice_minute)."""
+    rates = channel_utility_rates()["rates"]
+    if channel_key not in rates:
+        raise KeyError(f"no utility rate for {channel_key!r}; the rate sheet knows "
+                       f"{sorted(rates)}")
+    return rates[channel_key]
+
+
 def onboarding_step_order() -> list[Dict[str, Any]]:
     return list(onboarding()["step_order"])
 
