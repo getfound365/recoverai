@@ -116,10 +116,23 @@ class RecoverAI:
                         channels: Optional[Sequence[str]] = None,
                         aging_states: Optional[Sequence[str]] = None, who: Optional[str] = None,
                         validity_days: Optional[int] = None,
-                        scope_pairs: Optional[Sequence[Sequence[str]]] = None) -> Dict[str, Any]:
+                        scope_pairs: Optional[Sequence[Sequence[str]]] = None,
+                        tracking_mode: Optional[str] = None) -> Dict[str, Any]:
+        """The one canonical sign-off path: `onboarding.capture_signoff` and nothing else.
+
+        `tracking_mode` is the fee-tracking choice the wizard showed the signer (step 1).
+        It is FORWARDED, not interpreted here, because the choice is a component of the
+        signature reference: the digest is computed inside `onboarding.capture_signoff`,
+        where the scope pairs, the warranty version and the client row are all in hand.
+        Omitting it keeps the previous behaviour - the signature is taken under the choice
+        already on the client's row, defaulting to the rulebook's default mode.
+        (QA, 2026-10-10: this facade lacked the parameter while the bridge passed it, so
+        every console sign-off died with a TypeError before it reached the real path.)
+        """
         return onboarding.capture_signoff(self.store, client_id, signer_name, signer_title,
                                           channels, aging_states, who or signer_name, self.audit,
-                                          validity_days=validity_days, scope_pairs=scope_pairs)
+                                          validity_days=validity_days, scope_pairs=scope_pairs,
+                                          tracking_mode=tracking_mode)
 
     def switch_mode(self, client_id: str, new_mode: str, who: str, reason: str = "") -> Dict[str, Any]:
         return onboarding.switch_mode(self.store, client_id, new_mode, who, reason, self.audit, self.queue)

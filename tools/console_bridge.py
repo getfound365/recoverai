@@ -53,6 +53,14 @@ MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 SANDBOX_CLIENT_ID = os.environ.get("RECOVERAI_CONSOLE_CLIENT", "CLI-SANDBOX-AGENCY")
 SANDBOX_SIGNER_NAME = "Sandbox Operator"
 SANDBOX_SIGNER_TITLE = "Simulated signer - sandbox console fixture, not a real client authorization"
+#: The prefix every console FIXTURE client id carries. `_bootstrap` writes a Step 3
+#: acknowledgement (an explicit TRUE) and a signature ON a client's behalf, so it must be
+#: impossible for it to do that to a client a human is supposed to be signing for:
+#: `RECOVERAI_CONSOLE_CLIENT` exists to point the console at a different fixture (a demo
+#: store, a rehearsal), never to hand the bridge a real client to attest and sign for.
+#: A client id outside this prefix still READS fine - the console shows its real state,
+#: including a missing sign-off - but no fixture write is made for it.
+SANDBOX_CLIENT_ID_PREFIX = "CLI-SANDBOX"
 #: The sample file the console offers. It lives in the engine tree so the frontend never
 #: carries a copy of a mock row.
 SAMPLE_FILE = _REPO_ROOT / "samples" / "spreadsheet" / "agency_past_due_sample.csv"
@@ -103,8 +111,28 @@ def _bootstrap(engine) -> dict:
     the real ladder runs: the warranty first, then the signature that covers it. The engine
     gate is untouched - a real client still has to attest before its files can be
     registered.
+
+    It refuses to write EITHER for a client id that is not a console fixture (see
+    `SANDBOX_CLIENT_ID_PREFIX`): a Step 3 acknowledgement is a human's explicit TRUE and a
+    sign-off is a human's signature, so a bootstrap that filled both in for a real client
+    would manufacture the authorization the whole ladder exists to obtain. Reads are not
+    affected - the console still shows such a client's real state, including the sign-off
+    it does not have.
     """
     from engine import config, onboarding  # noqa: PLC0415
+    if not SANDBOX_CLIENT_ID.startswith(SANDBOX_CLIENT_ID_PREFIX):
+        detail = (f"client id {SANDBOX_CLIENT_ID!r} is not a console fixture "
+                  f"(a fixture id starts with {SANDBOX_CLIENT_ID_PREFIX!r}): the bridge "
+                  f"writes no Step 3 attestation and no signature for it. The Step 3 "
+                  f"warranty must be ticked by a human and the sign-off typed by a human.")
+        engine.audit.record("console_fixture_write_refused", client_id=SANDBOX_CLIENT_ID,
+                            refusal_token="BLOCKED_FIXTURE_WRITE_FOR_NON_SANDBOX_CLIENT",
+                            detail=detail, bootstrapped_by="tools/console_bridge.py")
+        return {"client_id": SANDBOX_CLIENT_ID, "created_client": False, "created_signoff": False,
+                "created_step3_attestation": False, "sandbox_fixture": True,
+                "fixture_writes_refused": True,
+                "refusal_token": "BLOCKED_FIXTURE_WRITE_FOR_NON_SANDBOX_CLIENT",
+                "detail": detail}
     row = onboarding.fetch_settings(engine.store, SANDBOX_CLIENT_ID)
     created_signoff = False
     created_client = row is None
