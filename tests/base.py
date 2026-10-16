@@ -81,6 +81,17 @@ class EngineTestCase(unittest.TestCase):
         return self.engine.capture_signoff(client_id, "Test Signer", "CFO", list(channels), list(states),
                                            who="test")
 
+    def attest_step3(self, client_id: str = "CLI-TEST", who: str = "test"):
+        """Record the Step 3 warranty the intake now binds a batch to (Phase 4).
+
+        Deliberately a separate call: a batch registered before its client attested is
+        REFUSED, so every test that registers one has to walk this step first.
+        """
+        from engine import onboarding
+        result = self.engine.record_step3_attestation(client_id, True, who, source="test")
+        self.assertTrue(result["ok"], result)
+        return result
+
     def force_mode(self, client_id: str, mode: str) -> None:
         """Write a mode straight into the store, bypassing switch_mode, to prove the claim
         transaction refuses a hand-edited mode row. Fails loudly if no row was updated."""

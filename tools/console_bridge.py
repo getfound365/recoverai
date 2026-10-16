@@ -53,6 +53,14 @@ MAX_UPLOAD_BYTES = 8 * 1024 * 1024
 SANDBOX_CLIENT_ID = os.environ.get("RECOVERAI_CONSOLE_CLIENT", "CLI-SANDBOX-AGENCY")
 SANDBOX_SIGNER_NAME = "Sandbox Operator"
 SANDBOX_SIGNER_TITLE = "Simulated signer - sandbox console fixture, not a real client authorization"
+#: The prefix every console FIXTURE client id carries. `_bootstrap` writes a Step 3
+#: acknowledgement (an explicit TRUE) and a signature ON a client's behalf, so it must be
+#: impossible for it to do that to a client a human is supposed to be signing for:
+#: `RECOVERAI_CONSOLE_CLIENT` exists to point the console at a different fixture (a demo
+#: store, a rehearsal), never to hand the bridge a real client to attest and sign for.
+#: A client id outside this prefix still READS fine - the console shows its real state,
+#: including a missing sign-off - but no fixture write is made for it.
+SANDBOX_CLIENT_ID_PREFIX = "CLI-SANDBOX"
 #: The sample file the console offers. It lives in the engine tree so the frontend never
 #: carries a copy of a mock row.
 SAMPLE_FILE = _REPO_ROOT / "samples" / "spreadsheet" / "agency_past_due_sample.csv"
@@ -91,14 +99,67 @@ def _engine():
 
 
 def _bootstrap(engine) -> dict:
-    """Make sure the sandbox client exists with a usable sign-off on file. Idempotent,
-    and honest about what it did: it writes an audit line saying the signature is a
-    sandbox fixture, never a client's."""
+    """Make sure the sandbox client exists with a usable sign-off AND a Step 3 attestation
+    on file. Idempotent, and honest about what it did: it writes an audit line saying both
+    are sandbox fixtures, never a client's.
+
+    Why the attestation belongs here: since the real Step 3 gate landed, the intake refuses
+    to register a batch for a client with no recorded attestation
+    (`BLOCKED_NO_STEP3_ATTESTATION`) - which is exactly right, and it would leave the
+    console's upload wizard permanently unable to commit, because this fixture client has no
+    human to tick the box. So the fixture ticks its own, labelled as a fixture, in the order
+    the real ladder runs: the warranty first, then the signature that covers it. The engine
+    gate is untouched - a real client still has to attest before its files can be
+    registered.
+
+    It refuses to write EITHER for a client id that is not a console fixture (see
+    `SANDBOX_CLIENT_ID_PREFIX`): a Step 3 acknowledgement is a human's explicit TRUE and a
+    sign-off is a human's signature, so a bootstrap that filled both in for a real client
+    would manufacture the authorization the whole ladder exists to obtain. Reads are not
+    affected - the console still shows such a client's real state, including the sign-off
+    it does not have.
+    """
     from engine import config, onboarding  # noqa: PLC0415
+    if not SANDBOX_CLIENT_ID.startswith(SANDBOX_CLIENT_ID_PREFIX):
+        detail = (f"client id {SANDBOX_CLIENT_ID!r} is not a console fixture "
+                  f"(a fixture id starts with {SANDBOX_CLIENT_ID_PREFIX!r}): the bridge "
+                  f"writes no Step 3 attestation and no signature for it. The Step 3 "
+                  f"warranty must be ticked by a human and the sign-off typed by a human.")
+        engine.audit.record("console_fixture_write_refused", client_id=SANDBOX_CLIENT_ID,
+                            refusal_token="BLOCKED_FIXTURE_WRITE_FOR_NON_SANDBOX_CLIENT",
+                            detail=detail, bootstrapped_by="tools/console_bridge.py")
+        return {"client_id": SANDBOX_CLIENT_ID, "created_client": False, "created_signoff": False,
+                "created_step3_attestation": False, "sandbox_fixture": True,
+                "fixture_writes_refused": True,
+                "refusal_token": "BLOCKED_FIXTURE_WRITE_FOR_NON_SANDBOX_CLIENT",
+                "detail": detail}
     row = onboarding.fetch_settings(engine.store, SANDBOX_CLIENT_ID)
     created_signoff = False
     created_client = row is None
-    if not row or not onboarding.signoff_state(row)["valid"]:
+    created_attestation = False
+    if onboarding.current_attestation(engine.store, SANDBOX_CLIENT_ID,
+                                      onboarding.ATTESTATION_STEP3) is None:
+        result = engine.record_step3_attestation(
+            SANDBOX_CLIENT_ID, True, "console-bridge-bootstrap",
+            source="console-bridge-bootstrap",
+            note=("sandbox console fixture: a simulated Step 3 attestation so the upload "
+                  "wizard has a warranty to bind a batch to. No real client, no real "
+                  "contact data and no real warranty exists."))
+        created_attestation = bool(result.get("ok"))
+        if not created_attestation:
+            raise RuntimeError(f"the sandbox Step 3 fixture attestation was refused: {result}")
+        engine.audit.record("onboarding_attestation_recorded", client_id=SANDBOX_CLIENT_ID,
+                            attestation_type=onboarding.ATTESTATION_STEP3,
+                            reason=("sandbox console fixture: a simulated Step 3 warranty "
+                                    "attestation. No real client exists."),
+                            bootstrapped_by="tools/console_bridge.py")
+    # The sign-off must cover the attestation that is on file: a fixture signature given
+    # before the warranty existed does not, so re-take it rather than let the console show
+    # a signature whose binding the ladder would never have produced.
+    attestation = onboarding.current_attestation(engine.store, SANDBOX_CLIENT_ID,
+                                                 onboarding.ATTESTATION_STEP3)
+    if (not row or not onboarding.signoff_state(row)["valid"]
+            or str(row.get("step3_attestation_id") or "") != str(attestation["attestation_id"])):
         scope_pairs = [[o["channel"], str(o["aging_state"])] for o in config.scope_options()]
         engine.capture_signoff(SANDBOX_CLIENT_ID, SANDBOX_SIGNER_NAME, SANDBOX_SIGNER_TITLE,
                                who="console-bridge-bootstrap", scope_pairs=scope_pairs)
@@ -110,7 +171,8 @@ def _bootstrap(engine) -> dict:
                                    "and no real authorization exists.",
                             bootstrapped_by="tools/console_bridge.py")
     return {"client_id": SANDBOX_CLIENT_ID, "created_client": created_client,
-            "created_signoff": created_signoff, "sandbox_fixture": True}
+            "created_signoff": created_signoff,
+            "created_step3_attestation": created_attestation, "sandbox_fixture": True}
 
 
 def _status(engine) -> dict:
@@ -235,14 +297,31 @@ def op_register(engine, request: dict) -> dict:
 
 
 def op_commit(engine, request: dict) -> dict:
+    """Start the import of a registered batch.
+
+    `uploader_id` here is NOT defaulted to a made-up name. It is handed through only when
+    the caller actually hands one, and passed as None when it does not - because that is
+    exactly the engine's own contract (`commit_spreadsheet` compares `uploader_id` against
+    the batch record only `if uploader_id`, and the batch record is the authoritative
+    statement of who handed the file over; `register` already required it). Inventing a
+    placeholder identity here - which is what a `"console-operator"` fallback did - put a
+    name in front of the engine that no human had given, and the honest result was a
+    refusal (`BATCH_PREVIEW_STATE_CHANGED`) against the batch's real uploader. The console
+    itself always sends the uploader it collected; the drift check stays live and still
+    fires for any caller that hands a name that is not the batch's.
+
+    `who` stays the acting-operator label for the audit line, and is the same default the
+    preview/register ops use, so a batch's trail reads consistently end to end.
+    """
     preview = request.get("preview")
     if not isinstance(preview, dict):
         raise ValueError("commit needs the preview payload the batch was raised from")
     if not str(request.get("batch_id") or "").strip():
         raise ValueError("commit needs the batch_id of the registered batch")
+    handed_uploader = str(request.get("uploader_id") or "").strip() or None
     return engine.commit_spreadsheet(
         preview, batch_id=str(request["batch_id"]),
-        uploader_id=str(request.get("uploader_id") or "console-operator"),
+        uploader_id=handed_uploader,
         who=str(request.get("who") or "console-operator"))
 
 
@@ -263,25 +342,37 @@ def op_sample(engine, request: dict) -> dict:
 def op_vocabulary(engine, request: dict) -> dict:
     """The reason-token vocabulary and the per-row evaluation order, read out of the
     rulebook. The console renders its legend from this, so a legend can never drift from
-    the tokens the engine actually emits."""
+    the tokens the engine actually emits.
+
+    It also carries Step 2's channel utility rate sheet (MODEL 2): internal operational
+    metrics, NOT client charges. It is here because both of the console's reference surfaces
+    read this op, and the rate block is read from the rulebook at call time - there is no
+    rate literal anywhere in the view code."""
     from engine import config  # noqa: PLC0415
     block = config.load_rulebook()["spreadsheet_intake"]
     return {"reason_tokens": block["reason_tokens"],
             "evaluation_order_per_row": block["evaluation_order_per_row"],
             "evaluation_order_note": block["evaluation_order_note"],
-            "source_formats": block["source_formats"]}
+            "source_formats": block["source_formats"],
+            "channel_utility_rates": config.channel_utility_rates()}
 
 
 def op_warranty(engine, request: dict) -> dict:
     """The exact Step 3 warranty the engine binds a batch to: its version, its wording,
     and the sha256 of that wording. The console renders these bytes and shows the hash,
-    so the checkbox a human ticks is the text the batch hash covers."""
+    so the checkbox a human ticks is the text the batch hash covers.
+
+    The Step 2 channel utility rate sheet rides along (MODEL 2, internal operational
+    metrics and NOT client charges) because this is the op the transparency surface is
+    built on: one payload tells a client both what we bind them to and what a unit of each
+    channel costs us, straight from the rulebook."""
     from engine import config, ingest  # noqa: PLC0415
     warranty = config.step3_warranty()
     text = str(warranty["text"])
     return {"document_version": warranty["version"], "text": text,
             "text_sha256": ingest.sha256_text(text),
-            "acknowledgement_present": bool(warranty.get("acknowledgement"))}
+            "acknowledgement_present": bool(warranty.get("acknowledgement")),
+            "channel_utility_rates": config.channel_utility_rates()}
 
 
 # --- daily operations (Phase 3, pass 3) -------------------------------------
@@ -488,6 +579,99 @@ def op_simulate_payment(engine, request: dict) -> dict:
     return result
 
 
+# --- onboarding, reports and the Integrations Hub (Phase 4) ------------------
+# Same rule as every op above: a thin dispatch onto the engine facade. The Step 2 and
+# Step 3 gates, the fee-tracking rebind, the report counts and the sample-file mapping
+# all live in engine/, so the console cannot show a gate as open that the engine refuses,
+# or a count the engine did not produce.
+def op_onboarding(engine, request: dict) -> dict:
+    _bootstrap(engine)
+    client_id = _client_id(request)
+    payload = engine.console_onboarding(client_id)
+    payload["mode"] = engine.console_mode(client_id)
+    return payload
+
+
+def op_tracking_mode(engine, request: dict) -> dict:
+    """Step 1, changed later. The engine writes the append-only trail row and rebinds the
+    sign-off; a change to a choice the sign-off covered REVOKES that sign-off."""
+    _bootstrap(engine)
+    client_id = _client_id(request)
+    new_mode = str(request.get("new_mode") or "").strip()
+    if not new_mode:
+        raise ValueError("tracking_mode needs a new_mode")
+    result = engine.set_tracking_mode(client_id, new_mode, _who(request),
+                                      str(request.get("reason") or "changed from the console"))
+    payload = {"result": result, "onboarding": engine.console_onboarding(client_id)}
+    payload["ok"] = bool(result.get("ok"))
+    if not result.get("ok"):
+        payload["refusal_token"] = result.get("refusal_token")
+    return payload
+
+
+def op_attest(engine, request: dict) -> dict:
+    """Record a Step 2 acknowledgement or the Step 3 warranty.
+
+    `acknowledged` is passed through EXACTLY as sent: the engine refuses anything that is
+    not explicitly true, so the console cannot tick this on the operator's behalf and the
+    unticked state is a real refusal, not a disabled button.
+    """
+    _bootstrap(engine)
+    client_id = _client_id(request)
+    step = str(request.get("step") or "").strip()
+    if step not in ("2", "3"):
+        raise ValueError("attest needs step '2' or '3'")
+    acknowledged = request.get("acknowledged")
+    note = str(request.get("note") or "") or None
+    if step == "2":
+        result = engine.record_step2_acknowledgement(client_id, acknowledged, _who(request),
+                                                     source="console", note=note)
+    else:
+        result = engine.record_step3_attestation(client_id, acknowledged, _who(request),
+                                                 source="console", note=note)
+    payload = dict(result)
+    payload["onboarding"] = engine.console_onboarding(client_id)
+    return payload
+
+
+def op_signoff(engine, request: dict) -> dict:
+    """Step 4: the signature. Everything the wizard collected is passed to the real
+    `capture_signoff`, which hashes the fee-tracking choice and the Step 3 attestation
+    text into the reference."""
+    _bootstrap(engine)
+    from engine import config  # noqa: PLC0415
+    client_id = _client_id(request)
+    signer_name = str(request.get("signer_name") or "").strip()
+    signer_title = str(request.get("signer_title") or "").strip()
+    if not signer_name or not signer_title:
+        result = {"ok": False, "refusal_token": "BLOCKED_SIGNOFF_INCOMPLETE",
+                  "detail": "a sign-off needs a typed signer name and corporate title"}
+        result["onboarding"] = engine.console_onboarding(client_id)
+        return result
+    scope_pairs = request.get("scope_pairs")
+    if not scope_pairs:
+        scope_pairs = [[o["channel"], str(o["aging_state"])] for o in config.scope_options()]
+    result = engine.capture_signoff(client_id, signer_name, signer_title,
+                                    who=_who(request), scope_pairs=scope_pairs,
+                                    tracking_mode=request.get("tracking_mode") or None)
+    result["ok"] = True
+    result["onboarding"] = engine.console_onboarding(client_id)
+    return result
+
+
+def op_reports(engine, request: dict) -> dict:
+    """Weekly and monthly counts from the engine's own logs. Real counts only."""
+    _bootstrap(engine)
+    return engine.console_reports(_client_id(request))
+
+
+def op_integrations(engine, request: dict) -> dict:
+    """The SIMULATED Integrations Hub: a sample export through the real mapper."""
+    _bootstrap(engine)
+    return engine.integrations_hub(client_id=_client_id(request),
+                                   sample=request.get("sample") or None)
+
+
 OPS = {
     "status": op_status,
     "bootstrap": op_bootstrap,
@@ -513,6 +697,13 @@ OPS = {
     "alerts": op_alerts,
     "money": op_money,
     "simulate_payment": op_simulate_payment,
+    # --- onboarding, reports and the Integrations Hub (Phase 4) ------------
+    "onboarding": op_onboarding,
+    "tracking_mode": op_tracking_mode,
+    "attest": op_attest,
+    "signoff": op_signoff,
+    "reports": op_reports,
+    "integrations": op_integrations,
 }
 
 

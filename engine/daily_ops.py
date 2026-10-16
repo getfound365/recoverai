@@ -992,3 +992,378 @@ def simulate_payment(engine) -> Dict[str, Any]:
     return {"ok": False, "refusal_token": "NO_RECORD_WITH_A_BALANCE",
             "detail": "no record with a positive balance in Open or Partially_Paid state "
                       "exists, so there is nothing to collect and nothing to simulate"}
+
+
+# ===========================================================================
+# Phase 4 - the onboarding ladder and the reports view.
+#
+# Both are read models in the same sense as everything above (columns, named
+# arithmetic, and labels with a documented precedence), except for one thing worth
+# saying out loud: `report_periods` counts rows in a WINDOW, and a window needs a
+# clock. The window is [now - N days, now] on the engine's own UTC clock, every count
+# is a COUNT over rows that exist, and a count with no rows is 0 - which is reported as
+# 0, never as "no data yet" and never as an estimate.
+# ===========================================================================
+def onboarding_screen(store, client_id: str) -> Dict[str, Any]:
+    """The onboarding ladder as the console renders it: every step, its gate, its trail.
+
+    Reads only. The Step 3 gate's own verdict (`gate_open`, `refusal_token`) comes from
+    `onboarding.step3_gate_state`, which is the SAME call the intake makes - so the
+    console cannot show a gate as open while the engine refuses a batch, or the reverse.
+    """
+    ladder = onboarding.onboarding_state(store, client_id)
+    batches = store.query(
+        "SELECT batch_id, file_name, rows_seen, rows_accepted, rows_rejected, recorded_at_ms, "
+        "recorded_at, uploader_id, warranty_step3_attestation_id, chain_hash "
+        "FROM ingestion_batches WHERE client_id = ? ORDER BY seq", (client_id,))
+    parked = [
+        {"debtor_id": row["debtor_id"], "name": row.get("name"),
+         "balance_owed": row.get("balance_owed"), "account_state": row.get("account_state"),
+         "open_edit_event": payments._parked_edit(store, row["debtor_id"])}
+        for row in store.query(
+            "SELECT * FROM debtor_records WHERE client_id = ? AND account_state = ? "
+            "ORDER BY debtor_id", (client_id, payments.STATE_PENDING_ADJUSTMENT))]
+    ledger = payments.ledger_for_client(store, client_id)
+    collected = int(ledger["totals"]["net_collected_cents"])
+    fee = int(ledger["totals"]["net_fee_cents"])
+    return {
+        "client_id": client_id,
+        "as_of": clock.iso_ms(),
+        "ladder": ladder,
+        "step3_gate": onboarding.step3_gate_state(store, client_id),
+        "batches": batches,
+        "batches_count": len(batches),
+        "batches_legacy_count": sum(1 for b in batches if not b["warranty_step3_attestation_id"]),
+        "batches_bound_to_a_step3_attestation": sum(
+            1 for b in batches if b["warranty_step3_attestation_id"]),
+        "parked_adjustments": parked,
+        "parked_adjustments_count": len(parked),
+        "collected_to_date_cents": collected,
+        "collected_to_date_label": f"${_money(collected) or '0.00'} collected to date",
+        "net_fee_cents": fee,
+        "statement_status": "DRAFT",
+        "statement_status_reason": statement(store, client_id)["status_reason"],
+        "fee_rate_percent": ledger["totals"]["fee_rate_percent"],
+        "honest_note": (
+            "Simulated end to end. No real client exists, the sandbox client's sign-off is a "
+            "simulated signature, no accounting system is connected and no money has been "
+            "collected: that is what the $0.00 above means, not a placeholder."),
+    }
+
+
+#: The report periods, in days back from now. `None` means all time.
+REPORT_PERIODS: Tuple[Tuple[str, Optional[int]], ...] = (
+    ("last_7_days", 7),
+    ("last_30_days", 30),
+    ("all_time", None),
+)
+
+
+def _in_window(rows: List[Dict[str, Any]], field_name: str, cutoff) -> List[Dict[str, Any]]:
+    """Rows whose ISO timestamp field is at or after `cutoff`. An unreadable stamp is
+    EXCLUDED rather than counted - fail closed, the same rule the parser uses."""
+    if cutoff is None:
+        return list(rows)
+    out = []
+    for row in rows:
+        raw = row.get(field_name)
+        if not raw:
+            continue
+        try:
+            if clock.parse_ts(str(raw)) >= cutoff:
+                out.append(row)
+        except Exception:
+            continue
+    return out
+
+
+def reports(store, client_id: str) -> Dict[str, Any]:
+    """Weekly and monthly counts, from the engine's own logs. Real counts only.
+
+    Sources, one per figure, each named in `sources` so nothing here is unattributable:
+      * contacts attempted      - outbound_contact_logs rows for this client
+      * claims committed        - rows with a claim_token, split claimed/blocked
+      * guardrail interceptions - the `decision` token on BLOCKED rows, counted by reason
+      * DNC additions           - debtor_records with dnc_flag = 1, dated by dnc_set_at
+      * mode changes            - autonomy_mode_history rows where the mode actually changed
+      * aging movement          - each record's stored (as-imported) aging_state against
+                                  the bucket its invoice_date implies today
+      * portfolio totals        - sums over debtor_records and the append-only ledger
+      * fee line                - the LEDGER's own net fee, which today is zero
+    """
+    contacts = store.query(
+        "SELECT * FROM outbound_contact_logs WHERE client_id = ? ORDER BY contact_log_id",
+        (client_id,))
+    modes = store.query(
+        "SELECT * FROM autonomy_mode_history WHERE client_id = ? ORDER BY history_id", (client_id,))
+    debtors = store.query("SELECT * FROM debtor_records WHERE client_id = ? ORDER BY debtor_id",
+                          (client_id,))
+    ledger = payments.ledger_for_client(store, client_id)
+    totals = ledger["totals"]
+    now = clock.now_utc()
+
+    periods: List[Dict[str, Any]] = []
+    for label, days in REPORT_PERIODS:
+        cutoff = clock.plus(days=-days, base=now) if days is not None else None
+        window_contacts = _in_window(contacts, "attempted_at", cutoff)
+        window_modes = _in_window(modes, "timestamp", cutoff)
+        window_dnc = _in_window([d for d in debtors if int(d.get("dnc_flag") or 0) == 1],
+                                "dnc_set_at", cutoff)
+        interceptions: Dict[str, int] = {}
+        for row in window_contacts:
+            if str(row.get("status")) == "BLOCKED":
+                token = str(row.get("decision") or "BLOCKED_UNKNOWN")
+                interceptions[token] = interceptions.get(token, 0) + 1
+        claimed = [r for r in window_contacts if r.get("claim_token")]
+        dispatched = [r for r in claimed if str(r.get("status")) in ("SENT", "DISPATCHED")]
+        periods.append({
+            "period": label,
+            "window_days": days,
+            "window_start": (clock.iso(cutoff) if cutoff is not None else None),
+            "window_end": clock.iso(now),
+            "contacts_attempted": len(window_contacts),
+            "contacts_attempted_by_channel": _count_by(window_contacts, "contact_type"),
+            "claims_committed": len(claimed),
+            "claims_committed_by_channel": _count_by(claimed, "contact_type"),
+            "contacts_dispatched": len(dispatched),
+            "contacts_blocked": sum(interceptions.values()),
+            "guardrail_interceptions_by_reason": dict(sorted(interceptions.items())),
+            "guardrail_free_claims": len(claimed),
+            "dnc_additions": len(window_dnc),
+            "mode_changes": sum(1 for m in window_modes if m["old_mode"] != m["new_mode"]),
+            "mode_change_attempts": len(window_modes),
+        })
+
+    aging_now = _aging_now(debtors, now)
+    moved = [row for row in aging_now if row["bucket_moved"]]
+    return {
+        "client_id": client_id,
+        "generated_at_ms": clock.iso_ms(),
+        "periods": periods,
+        "aging": {
+            "buckets_now": _count_by(aging_now, "current_aging_state"),
+            "buckets_as_imported": _count_by(aging_now, "imported_aging_state"),
+            "moved_since_import": len(moved),
+            "records_with_a_computable_age": len([r for r in aging_now if r["age_days"] is not None]),
+            "movement": [{"debtor_id": r["debtor_id"], "imported_aging_state": r["imported_aging_state"],
+                          "current_aging_state": r["current_aging_state"], "age_days": r["age_days"]}
+                         for r in moved],
+            "note": ("'As imported' is the aging_state Agent 1 normalized when the record "
+                     "arrived; 'now' is the bucket the invoice_date implies today. A record "
+                     "whose age cannot be computed from its invoice_date is excluded from the "
+                     "movement count rather than assumed to be 0 days old."),
+        },
+        "portfolio": {
+            "debtors": len(debtors),
+            "balance_owed_total": round(sum(float(d.get("balance_owed") or 0) for d in debtors), 2),
+            "balance_by_account_state": _sum_by(debtors, "account_state", "balance_owed"),
+            "by_account_state": _count_by(debtors, "account_state"),
+            "dnc_flagged": sum(1 for d in debtors if int(d.get("dnc_flag") or 0) == 1),
+            "with_email": sum(1 for d in debtors if d.get("email")),
+            "with_phone": sum(1 for d in debtors if d.get("phone")),
+        },
+        "fees": {
+            "net_collected_cents": int(totals["net_collected_cents"]),
+            "net_collected": _money(int(totals["net_collected_cents"])),
+            "net_fee_cents": int(totals["net_fee_cents"]),
+            "net_fee": _money(int(totals["net_fee_cents"])),
+            "ledger_lines": int(totals["line_count"]),
+            "collections_count": int(totals["collections_count"]),
+            "reversals_count": int(totals["reversals_count"]),
+            "fee_rate_percent": totals["fee_rate_percent"],
+            "basis": totals["basis"],
+            "line": f"${_money(int(totals['net_collected_cents'])) or '0.00'} collected to date",
+            "rule": ("The fee line comes only from reconciled collections, each line citing the "
+                     "confirmation source it came from. With no collections, it is zero - and "
+                     "zero is what is printed."),
+            "lines": ledger["lines"],
+        },
+        "statement": statement(store, client_id),
+        "sources": {
+            "contacts_attempted": "outbound_contact_logs.attempted_at",
+            "claims_committed": "outbound_contact_logs.claim_token IS NOT NULL",
+            "guardrail_interceptions_by_reason": "outbound_contact_logs.decision on BLOCKED rows",
+            "dnc_additions": "debtor_records.dnc_set_at where dnc_flag = 1",
+            "mode_changes": "autonomy_mode_history.timestamp where old_mode != new_mode",
+            "aging_movement": "debtor_records.aging_state vs the bucket invoice_date implies today",
+            "portfolio_totals": "debtor_records",
+            "fee_line": "collections_ledger (append-only), entry_type collection minus reversals",
+        },
+        "honest_note": (
+            "Real counts only: every figure is a COUNT or a SUM over rows this engine wrote, "
+            "and the windows are UTC. Nothing here is projected, annualised or extrapolated. "
+            "The fee line is zero because no money has been collected - not because the report "
+            "is a placeholder."),
+    }
+
+
+def _count_by(rows: List[Dict[str, Any]], field_name: str) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for row in rows:
+        key = str(row.get(field_name) if row.get(field_name) is not None else "unknown")
+        out[key] = out.get(key, 0) + 1
+    return dict(sorted(out.items()))
+
+
+def _sum_by(rows: List[Dict[str, Any]], key_field: str, value_field: str) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    for row in rows:
+        key = str(row.get(key_field) if row.get(key_field) is not None else "unknown")
+        out[key] = round(out.get(key, 0.0) + float(row.get(value_field) or 0), 2)
+    return dict(sorted(out.items()))
+
+
+def _aging_now(rows: List[Dict[str, Any]], now) -> List[Dict[str, Any]]:
+    """Each record with the bucket its invoice_date implies today, beside the one it
+    arrived with. An unparseable or missing invoice_date yields a None age - excluded
+    from the movement count, never silently treated as current."""
+    out = []
+    for row in rows:
+        imported = row.get("aging_state")
+        age_days: Optional[int] = None
+        raw = row.get("invoice_date")
+        if raw:
+            try:
+                age_days = max(0, (now - clock.parse_ts(str(raw))).days)
+            except Exception:
+                age_days = None
+        current = config.aging_state_for_days(age_days) if age_days is not None else imported
+        out.append({
+            "debtor_id": row["debtor_id"],
+            "imported_aging_state": imported,
+            "current_aging_state": current,
+            "age_days": age_days,
+            "bucket_moved": bool(age_days is not None and str(current) != str(imported)),
+        })
+    return out
+
+
+# ===========================================================================
+# Phase 4 - the Integrations Hub (a SIMULATION panel, labelled as one).
+#
+# The panel exists to answer one question honestly: what would a live sync DO with a
+# client's export? The answer comes from `ingest.normalize()` - the identical function a
+# live import calls - run over a SAMPLE file that lives in the engine tree. Nothing is
+# fetched, nothing is written, and no QuickBooks or Xero credential exists anywhere in
+# this engine. The words on the panel say exactly that.
+# ===========================================================================
+#: The sample exports, each naming the mock file it came from and the provider it
+#: imitates. The client ids stored in the files are the mock fixtures' own - a real
+#: connection would carry the connected client's id, and the panel says so.
+INTEGRATION_SAMPLES: Tuple[Dict[str, str], ...] = (
+    {"sample_id": "quickbooks_past_due", "provider": "QuickBooks Online (simulated)",
+     "file_name": "quickbooks_invoices.json",
+     "label": "QuickBooks Online — past-due invoice export (sample file)"},
+    {"sample_id": "xero_past_due", "provider": "Xero (simulated)",
+     "file_name": "xero_invoices.json",
+     "label": "Xero — past-due invoice export (sample file)"},
+)
+
+HONEST_HUB_LINE = ("No real QuickBooks or Xero connection exists; this panel runs sample "
+                   "files through the real mapper.")
+
+
+def _mock_dir() -> Path:
+    return config.repo_root() / "mocks" / "data"
+
+
+def integration_samples() -> List[Dict[str, Any]]:
+    """The sample exports available to the panel, with the sha256 of each file."""
+    out = []
+    for sample in INTEGRATION_SAMPLES:
+        path = _mock_dir() / sample["file_name"]
+        entry: Dict[str, Any] = dict(sample)
+        entry["available"] = path.exists()
+        entry["path"] = str(path)
+        if path.exists():
+            raw = path.read_bytes()
+            entry["file_sha256"] = ingest.sha256_text(raw.decode("utf-8"))
+            entry["size_bytes"] = len(raw)
+        out.append(entry)
+    return out
+
+
+def integrations_hub(store, *, client_id: str,
+                     sample: Optional[str] = None) -> Dict[str, Any]:
+    """Run one sample export through the REAL mapper and report what it WOULD map."""
+    samples = integration_samples()
+    chosen = None
+    for entry in samples:
+        if sample and entry["sample_id"] == sample:
+            chosen = entry
+            break
+    if chosen is None:
+        chosen = next((s for s in samples if s["available"]), samples[0] if samples else None)
+    if chosen is None or not chosen.get("available"):
+        return {"ok": False, "refusal_token": "SAMPLE_FILE_MISSING", "client_id": client_id,
+                "detail": "no sample export is available in mocks/data",
+                "samples": samples, "honest_line": HONEST_HUB_LINE}
+    rows = store.query("SELECT COUNT(*) AS n FROM debtor_records WHERE client_id = ?", (client_id,))
+    before = int(rows[0]["n"] or 0)
+    raw_text = Path(chosen["path"]).read_text(encoding="utf-8")
+    parsed = json.loads(raw_text)
+    records: List[Dict[str, Any]] = list(parsed.get("invoices") or [])
+    headers = list(records[0].keys()) if records else []
+    mapping = ingest.build_mapping(headers, list(records[0].values()) if records else None)
+    # THE REAL MAPPER, on the sample rows. Same call a live import makes.
+    result = ingest.normalize(records, source_system=chosen["provider"],
+                              endpoint=f"sample://{chosen['file_name']} (never fetched)",
+                              client_id_hint=parsed.get("client_id"))
+    report = result.report()
+    after = int(store.query("SELECT COUNT(*) AS n FROM debtor_records WHERE client_id = ?",
+                            (client_id,))[0]["n"] or 0)
+    return {
+        "ok": True,
+        "client_id": client_id,
+        "as_of": clock.iso_ms(),
+        "label": "SIMULATED",
+        "connection_status": "NO LIVE CONNECTION",
+        "honest_line": HONEST_HUB_LINE,
+        "honest_notes": [
+            HONEST_HUB_LINE,
+            "Nothing is fetched: the sample file above is read from this repository.",
+            "Nothing is written: this panel imports no rows, and the row count below is the "
+            "same before and after the run.",
+            "No QuickBooks or Xero credential, token or connection exists in this engine.",
+            "The mapping, the rejections and the aging buckets below are the REAL mapper's "
+            "output on the sample file - they are what a live sync would have produced from "
+            "the same export, and are labelled simulated because the export is a sample.",
+        ],
+        "samples": samples,
+        "selected": chosen,
+        "sample_meta": {
+            "file_name": chosen["file_name"],
+            "file_sha256": chosen.get("file_sha256"),
+            "source_system": parsed.get("source_system"),
+            "exported_at": parsed.get("exported_at"),
+            "fixture_client_id": parsed.get("client_id"),
+            "note": parsed.get("note"),
+            "rows_in_file": len(records),
+        },
+        "column_translation": mapping,
+        "would_map": {
+            "records_fetched": report["records_fetched"],
+            "records_normalized": report["records_normalized"],
+            "records_rejected": report["records_rejected"],
+            "rejected_detail": report["rejected_detail"],
+            "unmapped_columns": report["unmapped_columns"],
+            "aging_buckets": report["aging_buckets"],
+            "target_fields": report["target_fields"],
+            "mapping_rows": report["mapping"],
+            "normalized_rows": [
+                {"debtor_id": r.get("debtor_id"), "client_id": r.get("client_id"),
+                 "name": r.get("name"), "email": r.get("email"), "phone": r.get("phone"),
+                 "balance_owed": r.get("balance_owed"), "invoice_date": r.get("invoice_date"),
+                 "aging_state": r.get("aging_state")}
+                for r in result.records],
+        },
+        "writes": 0,
+        "write_proof": {
+            "debtor_records_before": before,
+            "debtor_records_after": after,
+            "unchanged": before == after,
+            "note": ("This panel is a read-only demonstration. Merging a file into the working "
+                     "queue is the spreadsheet intake's job, and it requires a registered "
+                     "ingestion batch bound to the client's Step 3 attestation."),
+        },
+    }

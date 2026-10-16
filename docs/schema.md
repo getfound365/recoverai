@@ -471,3 +471,58 @@ never rendered, even though the payment had really run: the ledger line and the 
 total moved while the panel that explains them stayed hidden. Found by the daily
 click-through on 2026-10-09, fixed in the bridge (not in the UI), and asserted in
 `tests/test_daily_ops.py::BridgeAcrossProcessesTests`.
+
+
+## Phase 4 — the onboarding ladder (added 2026-10-10)
+
+Two append-only tables and three columns close the onboarding experience: the fee-tracking
+choice, the Step 2 transparency acknowledgement and the REAL Step 3 warranty gate.
+
+### `onboarding_attestations` (append-only: UPDATE and DELETE rejected by trigger)
+
+One row per explicit tick of an onboarding acknowledgement. Two types:
+
+| `attestation_type` | what it is |
+| --- | --- |
+| `step2_fee_tracking_ack` | the mandatory "here is exactly how we charge and how we track collections" acknowledgement |
+| `step3_data_warranty` | **the real gate**: contact data accurate/active/lawfully consented, AS-IS beta with zero recovery guarantees, indemnification for data accuracy |
+
+Columns: `seq`, `attestation_id` (uuid), `client_id`, `attestation_type`, `document_version`,
+`rulebook_version`, `attestation_text` (the exact checkbox text, byte for byte),
+`text_sha256`, `acknowledged` (`CHECK (acknowledged = 1)` — an unacknowledged row is
+impossible, so "not ticked" can never be written to look like "ticked"),
+`acknowledged_by`, `acknowledged_at_ms`, `acknowledged_at`, `source`,
+`tracking_mode_at_attestation`, `attestation_sha256` (sha256 over the row's own content
+fields), `note`.
+
+`engine/onboarding.py::record_attestation` refuses with
+`BLOCKED_STEP2_ACKNOWLEDGEMENT_NOT_TICKED` / `BLOCKED_STEP3_WARRANTY_NOT_TICKED` unless the
+flag is explicitly TRUE. The hash proves content, not authorship: a hash is not a signature.
+
+### `collections_tracking_choices` (append-only)
+
+Step 1: how the client asked collections to be tracked (`integration` /
+`manual_attestation` / `hybrid`, default `hybrid`). The choice is **bound into the
+signature hash** (`onboarding.compute_signature_reference`), so it is an agreement term:
+changing it invokes `onboarding.set_tracking_mode`, which writes the trail row AND revokes
+the standing sign-off (dropping a `full_auto` client back to `hitl` and halting its
+schedule) because a signature that no longer describes the arrangement is not a signature
+for that arrangement.
+
+Columns: `choice_id`, `client_id`, `who`, `old_mode`, `new_mode`, `timestamp`,
+`timestamp_ms`, `reason`, `choice_version`, `bound_signature_reference`,
+`signoff_rebind_required`, `rebind_token`, `note`.
+
+### New columns on existing tables
+
+* `client_autonomy_settings.tracking_mode` (`TEXT NOT NULL DEFAULT 'hybrid'`, CHECK on the
+  three modes), `.tracking_mode_version`, `.step3_attestation_id` — the attestation the
+  standing sign-off is bound to.
+* `ingestion_batches.warranty_step3_attestation_id` and
+  `.warranty_step3_attestation_sha256` — the real gate's own evidence, inside
+  `warranty_binding_sha256`. `engine/ingest.py` refuses to register a batch without a Step
+  3 attestation on file (`BLOCKED_NO_STEP3_ATTESTATION`).
+  **Legacy rows** (empty attestation id) were appended before the gate existed: they are
+  verified against `BATCH_HASH_FIELDS_LEGACY` and stay valid, because `ingestion_batches`
+  is append-only history and re-hashing a committed row would be rewriting it.
+  `ingest.verify_ingestion_batches()` reports `legacy_rows` and `step3_gated_rows`.

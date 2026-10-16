@@ -218,6 +218,19 @@ class Store:
         ("client_autonomy_settings", "live_billing_receipt_metadata", "TEXT"),
         ("outbound_contact_logs", "approved_by", "TEXT"),
         ("outbound_contact_logs", "approved_at", "TEXT"),
+        # Phase 4 onboarding: the step-1 tracking choice, the Step 3 attestation the
+        # standing sign-off is bound to, and the two batch columns the real Step 3 gate
+        # writes. Defaulted and additive: an existing console.db (or data/recoverai.db)
+        # keeps every row, and an ingestion_batches row with an empty attestation id is a
+        # legacy row that still verifies (engine/ingest.py::BATCH_HASH_FIELDS_LEGACY).
+        ("client_autonomy_settings", "tracking_mode",
+         "TEXT NOT NULL DEFAULT 'hybrid'"),
+        ("client_autonomy_settings", "tracking_mode_version", "INTEGER NOT NULL DEFAULT 0"),
+        ("client_autonomy_settings", "step3_attestation_id", "TEXT"),
+        ("ingestion_batches", "warranty_step3_attestation_id",
+         "TEXT NOT NULL DEFAULT ''"),
+        ("ingestion_batches", "warranty_step3_attestation_sha256",
+         "TEXT NOT NULL DEFAULT ''"),
     )
 
     def _ensure_columns(self) -> None:

@@ -66,7 +66,27 @@ CREATE TABLE IF NOT EXISTS client_autonomy_settings (
     -- (sorted keys, compact separators) carrying the receipt and its sha256.
     -- Column-scoped trigger below: one NULL -> value write is allowed, every later
     -- change - including clearing it - is refused, while a mode toggle still works.
-    live_billing_receipt_metadata   TEXT
+    live_billing_receipt_metadata   TEXT,
+    -- ------------------------------------------------------------------
+    -- Onboarding (Phase 4, step 1 + step 3).
+    --
+    --   tracking_mode    how the client asked collections to be tracked.
+    --                    WHERE we look, never WHETHER we look. It is BOUND
+    --                    INTO THE SIGNATURE HASH (engine/onboarding.py::
+    --                    compute_signature_reference), so it is not a
+    --                    free-floating preference: changing it later revokes
+    --                    the sign-off it was signed under and forces a fresh
+    --                    signature. Every change is an append-only row in
+    --                    collections_tracking_choices.
+    --   step3_attestation_id  the onboarding_attestations row (type
+    --                    'step3_data_warranty') that the standing sign-off is
+    --                    bound to. NULL until a Step 3 attestation exists when
+    --                    the client signs.
+    -- ------------------------------------------------------------------
+    tracking_mode        TEXT NOT NULL DEFAULT 'hybrid'
+                         CHECK (tracking_mode IN ('integration', 'manual_attestation', 'hybrid')),
+    tracking_mode_version INTEGER NOT NULL DEFAULT 0,
+    step3_attestation_id TEXT
 );
 
 -- ---------------------------------------------------------------------------
@@ -603,6 +623,15 @@ CREATE TABLE IF NOT EXISTS ingestion_batches (
     warranty_document_version    TEXT NOT NULL,
     warranty_text_sha256         TEXT NOT NULL,
     warranty_binding_sha256      TEXT NOT NULL,
+    -- Phase 4: the REAL Step 3 gate this batch was accepted under. The attestation id and
+    -- the sha256 of the exact checkbox text that attestation recorded, both inside
+    -- warranty_binding_sha256. A row with an empty attestation id is a LEGACY row: it was
+    -- appended before the Step 3 gate existed, its batch_sha256 covers the legacy field set
+    -- (see engine/ingest.py::BATCH_HASH_FIELDS_LEGACY), and it stays valid - this table is
+    -- append-only history, and re-hashing old rows would be rewriting them. A NEW row
+    -- cannot be written at all without a Step 3 attestation on file for its client.
+    warranty_step3_attestation_id    TEXT NOT NULL DEFAULT '',
+    warranty_step3_attestation_sha256 TEXT NOT NULL DEFAULT '',
     batch_sha256         TEXT NOT NULL,
     prev_chain_hash      TEXT NOT NULL,
     chain_hash           TEXT NOT NULL,
@@ -619,6 +648,112 @@ CREATE TABLE IF NOT EXISTS ingestion_batches (
 
 CREATE INDEX IF NOT EXISTS ix_ingestion_batches_client
     ON ingestion_batches (client_id, seq);
+
+-- ---------------------------------------------------------------------------
+-- onboarding_attestations - APPEND ONLY. Phase 4: the onboarding ladder's recorded
+-- acknowledgements, one row per explicit tick.
+--
+--   step2_fee_tracking_ack  the mandatory "here is exactly how we charge and how we
+--                           track collections" acknowledgement.
+--   step3_data_warranty     THE REAL GATE. Contact data accurate, active and lawfully
+--                           consented; AS-IS beta with zero recovery guarantees;
+--                           indemnification for data accuracy. engine/ingest.py refuses
+--                           to register an ingestion batch without one
+--                           (BLOCKED_NO_STEP3_ATTESTATION).
+--
+-- Both are UNSELECTED by default and the backend refuses to record either one until the
+-- flag is explicitly TRUE: the CHECK (acknowledged = 1) makes an unacknowledged row
+-- impossible, so "not ticked" can never be written to look like "ticked". The exact
+-- checkbox text is stored against the client WITH the sha256 of that text and the
+-- document version, so the wording someone agreed to is recoverable byte-for-byte - and
+-- that same sha256 is what a batch's warranty binding carries.
+--
+-- HONESTY, the same shape as ingestion_batches: attestation_sha256 proves the row has not
+-- changed since it was written. It proves content, not authorship - a hash is not a
+-- signature, and acknowledged_by records who typed the acknowledgement, not who they are.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS onboarding_attestations (
+    seq                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    attestation_id       TEXT NOT NULL UNIQUE,
+    client_id            TEXT NOT NULL,
+    attestation_type     TEXT NOT NULL
+                         CHECK (attestation_type IN ('step2_fee_tracking_ack',
+                                                     'step3_data_warranty')),
+    document_version     TEXT NOT NULL,
+    rulebook_version     TEXT NOT NULL,
+    attestation_text     TEXT NOT NULL,
+    text_sha256          TEXT NOT NULL CHECK (length(text_sha256) = 64),
+    -- unselected by default, and unrecordable until the flag is explicitly TRUE
+    acknowledged         INTEGER NOT NULL CHECK (acknowledged = 1),
+    acknowledged_by      TEXT NOT NULL,
+    acknowledged_at_ms   TEXT NOT NULL,
+    acknowledged_at      TEXT NOT NULL,
+    source               TEXT NOT NULL,
+    -- the fee-tracking choice in force when this was ticked: a change to that choice
+    -- revokes the sign-off, and this is the record of what the client had chosen
+    tracking_mode_at_attestation TEXT NOT NULL,
+    attestation_sha256   TEXT NOT NULL CHECK (length(attestation_sha256) = 64),
+    note                 TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_onboarding_attestations_client
+    ON onboarding_attestations (client_id, attestation_type, seq);
+-- :sqlite-only
+CREATE TRIGGER IF NOT EXISTS onboarding_attestations_no_update
+BEFORE UPDATE ON onboarding_attestations
+BEGIN
+    SELECT RAISE(ABORT, 'onboarding_attestations is append-only: UPDATE is rejected');
+END;
+CREATE TRIGGER IF NOT EXISTS onboarding_attestations_no_delete
+BEFORE DELETE ON onboarding_attestations
+BEGIN
+    SELECT RAISE(ABORT, 'onboarding_attestations is append-only: DELETE is rejected');
+END;
+-- :end
+
+-- ---------------------------------------------------------------------------
+-- collections_tracking_choices - APPEND ONLY. Step 1 of onboarding: how the client
+-- asked collections to be tracked. Zero upfront does not mean zero evidence: the choice
+-- is part of the agreement, so it is BOUND INTO THE SIGNATURE HASH and changing it is a
+-- change to the arrangement - the engine revokes the standing sign-off, drops the client
+-- to hitl and requires a fresh signature under the new choice. This table is the
+-- immutable trail of who changed it, from what, to what, at which millisecond, why, and
+-- which signature the change invalidated.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS collections_tracking_choices (
+    choice_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id        TEXT NOT NULL,
+    who              TEXT NOT NULL,
+    old_mode         TEXT NOT NULL
+                     CHECK (old_mode IN ('integration', 'manual_attestation', 'hybrid')),
+    new_mode         TEXT NOT NULL
+                     CHECK (new_mode IN ('integration', 'manual_attestation', 'hybrid')),
+    timestamp        TEXT NOT NULL,
+    timestamp_ms     TEXT NOT NULL,
+    reason           TEXT,
+    choice_version   INTEGER,
+    -- the signature reference in force when the choice changed, and whether the change
+    -- pulled it: a sign-off that no longer describes the tracking arrangement is not a
+    -- valid sign-off
+    bound_signature_reference TEXT,
+    signoff_rebind_required   INTEGER NOT NULL DEFAULT 0
+                              CHECK (signoff_rebind_required IN (0, 1)),
+    rebind_token     TEXT,
+    note             TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_collections_tracking_choices_client
+    ON collections_tracking_choices (client_id, choice_id);
+-- :sqlite-only
+CREATE TRIGGER IF NOT EXISTS collections_tracking_choices_no_update
+BEFORE UPDATE ON collections_tracking_choices
+BEGIN
+    SELECT RAISE(ABORT, 'collections_tracking_choices is append-only: UPDATE is rejected');
+END;
+CREATE TRIGGER IF NOT EXISTS collections_tracking_choices_no_delete
+BEFORE DELETE ON collections_tracking_choices
+BEGIN
+    SELECT RAISE(ABORT, 'collections_tracking_choices is append-only: DELETE is rejected');
+END;
+-- :end
 
 -- :sqlite-only
 CREATE TRIGGER IF NOT EXISTS collections_ledger_no_update
@@ -869,6 +1004,17 @@ CREATE TRIGGER ingestion_batches_no_update
     BEFORE UPDATE OR DELETE ON ingestion_batches
     FOR EACH ROW EXECUTE FUNCTION recoverai_append_only();
 
+-- Phase 4: the onboarding ladder's two append-only logs.
+DROP TRIGGER IF EXISTS onboarding_attestations_no_update ON onboarding_attestations;
+CREATE TRIGGER onboarding_attestations_no_update
+    BEFORE UPDATE OR DELETE ON onboarding_attestations
+    FOR EACH ROW EXECUTE FUNCTION recoverai_append_only();
+
+DROP TRIGGER IF EXISTS collections_tracking_choices_no_update ON collections_tracking_choices;
+CREATE TRIGGER collections_tracking_choices_no_update
+    BEFORE UPDATE OR DELETE ON collections_tracking_choices
+    FOR EACH ROW EXECUTE FUNCTION recoverai_append_only();
+
 -- The bound receipt entry: one NULL -> value write, then nothing. Column-scoped, so a
 -- mode toggle (which never names this column) is unaffected.
 CREATE OR REPLACE FUNCTION recoverai_receipt_metadata_bound_once() RETURNS trigger AS $recoverai$
@@ -943,4 +1089,19 @@ ALTER TABLE client_autonomy_settings
     ADD COLUMN IF NOT EXISTS live_billing_receipt_metadata TEXT;
 ALTER TABLE outbound_contact_logs ADD COLUMN IF NOT EXISTS approved_by TEXT;
 ALTER TABLE outbound_contact_logs ADD COLUMN IF NOT EXISTS approved_at TEXT;
+-- Phase 4 onboarding: step 1's tracking choice, the Step 3 attestation the standing
+-- sign-off is bound to, and the two columns a batch carries for the real Step 3 gate.
+-- Defaulted and additive, so a database created before this pass keeps every row and
+-- every already-committed batch: a batch row whose attestation id is empty is a legacy
+-- row and verifies against the legacy field set (engine/ingest.py::BATCH_HASH_FIELDS_LEGACY).
+ALTER TABLE client_autonomy_settings
+    ADD COLUMN IF NOT EXISTS tracking_mode TEXT NOT NULL DEFAULT 'hybrid';
+ALTER TABLE client_autonomy_settings
+    ADD COLUMN IF NOT EXISTS tracking_mode_version INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE client_autonomy_settings
+    ADD COLUMN IF NOT EXISTS step3_attestation_id TEXT;
+ALTER TABLE ingestion_batches
+    ADD COLUMN IF NOT EXISTS warranty_step3_attestation_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE ingestion_batches
+    ADD COLUMN IF NOT EXISTS warranty_step3_attestation_sha256 TEXT NOT NULL DEFAULT '';
 -- :end
